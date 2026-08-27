@@ -1,0 +1,49 @@
+{
+  "name": "dsh-veryim",
+  "version": "0.1.0-rc.2",
+  "description": "即时通讯渠道插件——把 Telegram 等 IM 接入 DSH",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots",
+        "remote",
+        "settings"
+      ]
+    }
+  },
+  "scripts": {
+    "build:server": "cd src && tsc --noEmitOnError false --outDir ../lib --target ES2022 --module ESNext --moduleResolution bundler --declaration false --esModuleInterop true --skipLibCheck true",
+    "build:client": "npx tsdown",
+    "build": "npm run build:server && npm run build:client"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml"
+  ],
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "tsdown": "^0.22.14",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "undici": "^8.10.0"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "src",
+    "outDir": "lib",
+    "declaration": true,
+    "sourceMap": true,
+    "types": ["node", "react"]
+  },
+  "include": ["src/index.ts"],
+  "exclude": ["lib"]
+}

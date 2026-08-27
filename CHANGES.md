@@ -1,5 +1,28 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第六次）— 命令气泡单行显示 + 引用逻辑调整
+
+### 为什么改
+1. 工具命令气泡有时显示为多行，需要确保始终一行一条
+2. 工具命令（⚙️）不应引用用户消息，只有最终回复才引用
+
+### 改了什么
+- `src/index.ts`：
+  1. `send(t, reply)` 加可选 `reply` 参数（默认 false），只有 `reply=true` 时带 `reply_to_message_id`
+  2. 最终回复 `splitMessages(answer)` 的每个 chunk 调用 `send(chunk, true)` 启用引用
+  3. 工具命令气泡和其他消息不传 reply，保持无引用
+  4. `toolLabel()` 返回值压成单行：去掉换行符 `\n`、合并连续空格
+
+### 验证效果
+- `⚙️ 执行命令：ls -la` — 单行显示，不引用用户消息
+- `⚙️ 读取文件：config.yaml` — 单行显示，不引用用户消息
+- 最终回复 — 引用用户原文
+
+### 部署
+- 构建：`npm run build:server`
+- 部署：cp lib/index.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28（第五次）— 简化推理思考显示
 
 ### 为什么改

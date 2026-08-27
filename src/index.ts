@@ -135,10 +135,10 @@ async function handleMsg(ch: any, msg: any) {
   const myGen = (chatGens.get(key) || 0) + 1
   chatGens.set(key, myGen)
 
-  const send = async (t: string) => {
+  const send = async (t: string, reply = false) => {
     const md = mdToTelegram(t)
-    // 引用用户发的那条消息（reply_to_message_id），回复内容上方显示所引用的原文
-    const base: any = { chat_id: chatId, text: md, parse_mode: 'MarkdownV2', reply_to_message_id: msgId, allow_sending_without_reply: true }
+    // reply=true 时引用用户原文，其他情况不引用
+    const base: any = { chat_id: chatId, text: md, parse_mode: 'MarkdownV2', ...(reply ? { reply_to_message_id: msgId, allow_sending_without_reply: true } : {}) }
     let resp: any = await tg(ch, '/sendMessage', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(base),
@@ -278,7 +278,7 @@ async function handleMsg(ch: any, msg: any) {
     const answer = collectAnswer(events, minTurn)
     if (answer && !answerSent) {
       answerSent = true
-      for (const chunk of splitMessages(answer)) await send(chunk)
+      for (const chunk of splitMessages(answer)) await send(chunk, true)
     }
 
     const items = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
@@ -555,7 +555,8 @@ function toolLabel(name: string, args: any): string {
   if (TOOLS_NO_PREVIEW.has(name)) return verb
   const preview = toolPreview(name, args)
   if (!preview) return verb
-  return verb + '：' + preview
+  // 压成单行：去掉换行、多个空格合并
+  return (verb + '：' + preview).replace(/\n/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
 // ── 收集本回合（minTurn 之后）的思考文本 ──

@@ -139,18 +139,27 @@ async function handleMsg(ch: any, msg: any) {
     const md = mdToTelegram(t)
     // reply=true 时引用用户原文，其他情况不引用
     const base: any = { chat_id: chatId, text: md, parse_mode: 'MarkdownV2', ...(reply ? { reply_to_message_id: msgId, allow_sending_without_reply: true } : {}) }
-    let resp: any = await tg(ch, '/sendMessage', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(base),
-    })
-    // MarkdownV2 解析失败（未闭合代码块/残留特殊字符）→ 回退纯文本
-    if (!resp?.ok && /parse|entity|UTF|invalid/i.test(resp?.description || '')) {
-      resp = await tg(ch, '/sendMessage', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...base, text: t, parse_mode: undefined }),
-      })
+    // 失败重试 3 次，不向上抛异常（一次网络失败不能中断整个消息处理）
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        let resp: any = await tg(ch, '/sendMessage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(base),
+        })
+        // MarkdownV2 解析失败（未闭合代码块/残留特殊字符）→ 回退纯文本
+        if (!resp?.ok && /parse|entity|UTF|invalid/i.test(resp?.description || '')) {
+          resp = await tg(ch, '/sendMessage', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...base, text: t, parse_mode: undefined }),
+          })
+        }
+        return resp
+      } catch (e: any) {
+        console.warn(`[dsh-veryIM] ${ch.name} sendMessage 失败(第${attempt + 1}/3): ${e.message}`)
+        if (attempt < 2) await sleep(2000)
+      }
     }
-    return resp
+    return null
   }
   const edit = async (messageId: number, t: string) => {
     const md = mdToTelegram(t)
@@ -231,19 +240,26 @@ async function handleMsg(ch: any, msg: any) {
   let shownThinking = ''
   // 已发出气泡的工具调用（按"工具名+参数摘要"去重，避免重复发同一条）
   const shownTools = new Set<string>()
-  // 是否已发出最终回复
-  let answerSent = false
-  // 最新一条 assistant text（最终回复候选）
-  let latestAnswer = ''
+  // 回复消息 id（渐进更新一条 💬 消息，最终停在最终回复）
+  let answerMsgId: number | null = null
+  // 已显示的回复内容
+  let shownAnswer = ''
   // 工具结果独立气泡（可选显示）
   const shownResults = new Map<string, string>()
 
   for (let i = 0; i < 600; i++) {
     if (chatGens.get(key) !== myGen) break   // 已被更新的消息取代 → 立即停止
     await sleep(1500)
-    if (i % 2 === 0) await typing()
-    const msgs = await dsh('session.history', { sessionId: sid })
-    const events = (msgs?.result?.value?.events || [])
+    if (i % 2 === 0) await typing().catch(() => {})
+    let events: any[] = []
+    try {
+      const msgs = await dsh('session.history', { sessionId: sid })
+      events = (msgs?.result?.value?.events || [])
+    } catch (e: any) {
+      // 单次 RPC 失败（如 dsh 重启窗口）不中断，下一轮继续
+      console.warn(`[dsh-veryIM] ${ch.name} 轮询 history 失败: ${e.message}`)
+      continue
+    }
 
     // 1) 思考 → 渐进填充一条 🤔 消息（只显示精简摘要，不显示完整推理）
     const thinking = collectThinking(events, minTurn)
@@ -276,42 +292,44 @@ async function handleMsg(ch: any, msg: any) {
       }
     }
 
-    // 3) 最终回复：持续追踪最新一条 assistant text，但先不发送——
-    //    AI 过程中会有多个 text，等 session 结束后只发最终的那条
+    // 3) 最终回复：渐进更新一条 💬 消息——AI 每次输出 text 就实时更新，
+    //    用户随时能看到回复内容，最终停在最终回复
     const answer = collectAnswer(events)
-    if (answer) latestAnswer = answer
+    if (answer && answer !== shownAnswer) {
+      shownAnswer = answer
+      if (answerMsgId) await edit(answerMsgId, cap(answer, MAX_MSG)).catch(() => {})
+      else { const s = await send(answer, true); if (s?.ok) answerMsgId = s.result.message_id }
+    }
 
-    const items = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
+    let items: any[] = []
+    try { items = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch (e: any) { console.warn(`[dsh-veryIM] ${ch.name} session.list 失败: ${e.message}`) }
     if (!items.find((s: any) => s.sessionId === sid)?.running) break
   }
 
-  // 发送最终回复（session 已完成，latestAnswer 为最终回复）
-  if (!answerSent && latestAnswer && chatGens.get(key) === myGen) {
-    answerSent = true
-    for (const chunk of splitMessages(latestAnswer)) await send(chunk, true)
-  }
-
-  // ── 补发阶段：如果还没拿到最终回复，重试几次拉最新 assistant text ──
-  if (!answerSent && chatGens.get(key) === myGen) {
+  // ── 兜底：若全程没显示过回复（极少数竞态），session 结束后补发最终回复 ──
+  if (!shownAnswer && chatGens.get(key) === myGen) {
     for (let retry = 0; retry < 8; retry++) {
       await sleep(2000)
-      const msgs = await dsh('session.history', { sessionId: sid })
-      const events = (msgs?.result?.value?.events || [])
+      let events: any[] = []
+      try { const msgs = await dsh('session.history', { sessionId: sid }); events = (msgs?.result?.value?.events || []) } catch { continue }
       const answer = collectAnswer(events)
       if (answer) {
-        answerSent = true
-        for (const chunk of splitMessages(answer)) await send(chunk, true)
+        const s = await send(answer, true)
+        if (s?.ok) answerMsgId = s.result.message_id
+        shownAnswer = answer
         break
       }
       // 如果 session 已结束且多次没拿到 answer，放弃
-      const items2 = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
+      let items2: any[] = []
+      try { items2 = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch { /* 继续重试 */ }
       if (!items2.find((s: any) => s.sessionId === sid)?.running && retry >= 2) break
     }
   }
 
   // 超时仍在处理 → 更新时间消息上的提示
-  const items = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
-  if (chatGens.get(key) === myGen && items.find((s: any) => s.sessionId === sid)?.running) {
+  let sitems: any[] = []
+  try { sitems = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch { /* ignore */ }
+  if (chatGens.get(key) === myGen && sitems.find((s: any) => s.sessionId === sid)?.running) {
     const brief = shownThinking ? summarizeThinking(shownThinking) : ''
     await edit(thinkingMsgId || 0, cap((brief ? brief : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
   }

@@ -1,5 +1,30 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第九次）— 回复实时渐进更新 + 网络容错
+
+### 为什么改
+第八次把回复改成"session 结束后才发送"，但长任务 AI 要跑很久，用户中途只看到命令气泡，
+以为没回复。且日志发现 `handleMsg err: fetch failed`——一次 Telegram/RPC 网络失败会中断
+整个消息处理，导致后续轮询全停、回复发不出来。
+
+### 改了什么
+- `src/index.ts`：
+  1. **回复改为实时渐进更新**：像思考气泡一样，AI 每次输出 text 就用一条 💬 消息实时
+     更新（send 首条 + edit 后续），用户随时能看到回复内容，最终停在最终回复。
+  2. **轮询循环容错**：`session.history` / `session.list` 单次失败不再中断整个 handleMsg，
+     记录 warn 后下一轮继续（`console.warn` + `continue`）。
+  3. **send 失败重试**：sendMessage 失败自动重试 3 次（每次间隔 2s），不再向上抛异常中断。
+  4. 兜底阶段/超时提示同样加 try-catch。
+
+### 验证
+真实 telegram 会话最终回复 1128 字，渐进更新方案下用户可实时看到回复增长，
+session 结束后停留最终回复。
+
+### 部署
+- 构建：`npm run build:server`
+- 部署：cp lib/index.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28（第八次）— 根因修复：最终回复采集逻辑
 
 ### 为什么改

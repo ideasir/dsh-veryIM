@@ -430,76 +430,129 @@ function splitMessages(text: string, max = 3900): string[] {
   return out
 }
 
-// ── 工具调用预览：Hermes 风格的人类可读短语 ──────────────
-// 移植自 Hermes agent 的 display.py：动词 + 主参数摘要，不显示原始 JSON
+// ── 工具调用预览：中文人类可读短语 ────────────────────────
+// 动词 + 主参数摘要，不显示原始 JSON；全部用中文显示
 const TOOL_VERBS: Record<string, string> = {
-  web_search: 'Searching the web',
-  web_extract: 'Reading',
-  browser_navigate: 'Browsing',
-  browser_click: 'Clicking',
-  browser_type: 'Typing',
-  read_file: 'Reading',
-  write_file: 'Writing',
-  patch: 'Editing',
-  search_files: 'Searching files',
-  terminal: 'Running',
-  execute_code: 'Running code',
-  image_generate: 'Generating image',
-  video_generate: 'Generating video',
-  text_to_speech: 'Generating speech',
-  vision_analyze: 'Looking at',
-  session_search: 'Searching past sessions',
-  skill_view: 'Reading skill',
-  skills_list: 'Listing skills',
-  skill_manage: 'Updating skill',
-  delegate_task: 'Delegating',
-  cronjob: 'Scheduling',
-  clarify: 'Asking',
-  memory: 'Updating memory',
-  todo: 'Updating tasks',
-  // DSH / veryIM 特有工具
-  list_secrets: 'Listing secrets',
-  resolve_secret: 'Resolving secret',
-  credential_exec: 'Running credential',
-  credential_http: 'Calling credential',
+  // 核心文件/命令
+  bash: '执行命令',
+  terminal: '执行命令',
+  read: '读取文件',
+  read_file: '读取文件',
+  write: '写入文件',
+  write_file: '写入文件',
+  edit: '编辑文件',
+  patch: '编辑文件',
+  glob: '搜索文件',
+  search_files: '搜索文件',
+  grep: '搜索内容',
+  // Web
+  web_search: '搜索网页',
+  web_extract: '读取网页',
+  // 多媒体
+  makemake_image: '生成图片',
+  image_generate: '生成图片',
+  makemake_video: '生成视频',
+  video_generate: '生成视频',
+  read_image: '查看图片',
+  looklook_see: '查看内容',
+  vision_analyze: '查看',
+  process_zip: '处理压缩包',
+  // 目标与任务
+  create_goal: '创建目标',
+  get_goal: '读取目标',
+  update_goal: '更新目标',
+  todo_write: '更新任务列表',
+  todo: '更新任务',
+  // 子代理与工作流
+  subagent: '委派子任务',
+  subagent_fork: '委派继承子任务',
+  delegate_task: '委派任务',
+  workflow: '编排工作流',
+  ralph: '运行 Ralph 循环',
+  send_message: '发送消息',
+  interrupt_agent: '中断代理',
+  list_agents: '列出代理',
+  // 后台任务
+  job_kill: '停止任务',
+  job_output: '读取任务输出',
+  job_list: '列出任务',
+  // 凭据与密钥
+  credential_exec: '执行凭据命令',
+  credential_http: '调用凭据接口',
+  list_secrets: '查看密钥',
+  resolve_secret: '查找密钥',
+  // 技能与模式
+  skill: '加载技能',
+  skill_view: '读取技能',
+  skills_list: '列出技能',
+  skill_manage: '更新技能',
+  exit_plan_mode: '退出计划模式',
+  // 其他
+  ask_user_question: '询问用户',
+  clarify: '询问',
+  memory: '更新记忆',
+  cronjob: '调度任务',
+  session_search: '搜索历史会话',
 }
-const TOOLS_NO_PREVIEW = new Set(['skills_list', 'session_search'])
-const TOOLS_FOR_CONNECTOR = new Set(['web_search', 'search_files'])
+const TOOLS_NO_PREVIEW = new Set(['skills_list', 'list_secrets', 'get_goal', 'job_list', 'list_agents', 'session_search', 'exit_plan_mode'])
 
 // 提取工具名的"人类可读预览"——从参数中取最关键的字段
 function toolPreview(name: string, args: any): string {
   const a = typeof args === 'string' ? (() => { try { return JSON.parse(args) } catch { return {} } })() : (args || {})
-  if (name === 'terminal' || name === 'execute_code') {
+  // 执行命令类：取命令首行
+  if (name === 'bash' || name === 'terminal' || name === 'execute_code' || name === 'credential_exec') {
     const cmd = (a.command || a.code || '').trim()
-    // 取第一行、去掉前后空白
     const first = cmd.split('\n')[0].trim()
     return first.length > 80 ? first.slice(0, 77) + '…' : first
   }
-  if (name === 'read_file') return basename(a.path || a.file || a.filepath || '')
-  if (name === 'write_file' || name === 'patch') return basename(a.path || a.file || '')
-  if (name === 'search_files') return a.pattern || ''
-  if (name === 'web_search') return a.query || ''
-  if (name === 'skill_view') return a.name || ''
+  // 文件类：取文件名
+  if (name === 'read' || name === 'read_file' || name === 'read_image') return basename(a.file_path || a.path || a.file || a.filepath || '')
+  if (name === 'write' || name === 'write_file' || name === 'edit' || name === 'patch') return basename(a.file_path || a.path || a.file || '')
+  if (name === 'glob' || name === 'search_files' || name === 'grep') return a.pattern || ''
+  // Web
+  if (name === 'web_search') { const q = a.query || (Array.isArray(a.queries) ? a.queries[0] : ''); return typeof q === 'string' ? q : '' }
+  // 多媒体
+  if (name === 'makemake_image' || name === 'makemake_video') {
+    const p = (a.prompt || '').trim()
+    return p.length > 40 ? p.slice(0, 37) + '…' : p
+  }
+  if (name === 'looklook_see') return a.source ? basename(a.source) : ''
+  if (name === 'process_zip') return a.path ? basename(a.path) : ''
+  // 目标/任务
+  if (name === 'create_goal' || name === 'ralph') return a.objective ? (a.objective as string).slice(0, 50) + ((a.objective as string).length > 50 ? '…' : '') : ''
+  if (name === 'update_goal') return a.action || ''
+  if (name === 'todo_write' || name === 'todo') return Array.isArray(a.todos) ? `${a.todos.length} 项任务` : ''
+  // 子代理
+  if (name === 'subagent' || name === 'subagent_fork' || name === 'delegate_task') {
+    const p = a.prompt || a.goal || a.description || ''
+    return p.length > 50 ? p.slice(0, 47) + '…' : p
+  }
+  if (name === 'send_message') { const m = (a.message || ''); return m.length > 40 ? m.slice(0, 37) + '…' : m }
+  // 凭据
+  if (name === 'resolve_secret') return a.variable || ''
+  if (name === 'credential_http') return a.url || ''
+  if (name === 'skill' || name === 'skill_view') return a.name || ''
   if (name === 'skill_manage') return (a.action || '') + ' ' + (a.name || '')
   if (name === 'memory') return (a.action || '') + ' ' + (a.target || '')
-  if (name === 'todo') return (a.action || '') + ' ' + (Array.isArray(a.todos) ? a.todos.length + ' tasks' : '')
   if (name === 'cronjob') return a.action || ''
-  if (name === 'clarify') return a.question ? a.question.slice(0, 40) + (a.question.length > 40 ? '…' : '') : ''
-  if (name === 'delegate_task') return a.goal ? a.goal.slice(0, 50) + (a.goal.length > 50 ? '…' : '') : ''
+  if (name === 'ask_user_question' || name === 'clarify') {
+    const qs = a.questions
+    const q = (Array.isArray(qs) ? qs[0]?.question : a.question) || ''
+    return q.length > 40 ? q.slice(0, 37) + '…' : q
+  }
   // 通用回退：取 args 的第一个字符串值
   for (const v of Object.values(a)) { if (typeof v === 'string' && v.trim()) return v.slice(0, 60) + (v.length > 60 ? '…' : '') }
   return ''
 }
 function basename(p: string): string { return p.split('/').pop() || p }
 
-// 生成一条工具调用的完整短语（动词 + 预览）
+// 生成一条工具调用的完整中文短语（动词 + 冒号 + 预览）
 function toolLabel(name: string, args: any): string {
-  const verb = TOOL_VERBS[name] || 'Using'
+  const verb = TOOL_VERBS[name] || '使用工具'
   if (TOOLS_NO_PREVIEW.has(name)) return verb
   const preview = toolPreview(name, args)
   if (!preview) return verb
-  const conn = TOOLS_FOR_CONNECTOR.has(name) ? ' for ' : ' '
-  return verb + conn + preview
+  return verb + '：' + preview
 }
 
 // ── 收集本回合（minTurn 之后）的思考文本 ──

@@ -1,5 +1,54 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第三次）— 命令气泡改为中文显示 + 适配 DSH 实际工具名
+
+### 为什么改
+主任反馈：电报聊天界面里，工具调用气泡显示的是英文动词短语
+（"Running df -h"、"Reading config.yaml"、"Editing ..."），希望全部改为中文。
+同时明确要求：思考、命令、回复三部分分别用**单独的气泡**显示。
+
+### 改了什么
+- `src/index.ts`：
+  1. `TOOL_VERBS` 全部翻译为中文，并适配 DSH 实际工具名：
+     - 核心：`bash/terminal→执行命令`、`read/read_file→读取文件`、
+       `write/write_file→写入文件`、`edit/patch→编辑文件`、`glob/search_files→搜索文件`、
+       `grep→搜索内容`
+     - Web：`web_search→搜索网页`
+     - 多媒体：`makemake_image→生成图片`、`makemake_video→生成视频`、`read_image→查看图片`、
+       `looklook_see→查看内容`、`process_zip→处理压缩包`
+     - 目标/任务：`create_goal→创建目标`、`update_goal→更新目标`、`todo_write→更新任务列表`
+     - 子代理/工作流：`subagent→委派子任务`、`workflow→编排工作流`、`ralph→运行 Ralph 循环`、
+       `send_message→发送消息`、`interrupt_agent→中断代理`
+     - 后台任务：`job_kill→停止任务`、`job_output→读取任务输出`、`job_list→列出任务`
+     - 凭据：`credential_exec→执行凭据命令`、`credential_http→调用凭据接口`、
+       `list_secrets→查看密钥`、`resolve_secret→查找密钥`
+     - 技能/其他：`skill→加载技能`、`ask_user_question→询问用户`、`memory→更新记忆`等
+     - 保留旧工具名（read_file/write_file/patch/terminal...）作为兼容回退
+  2. `toolLabel()` 连接符由英文 `' for '` / `' '` 改为中文冒号 `'：'`，
+     默认动词回退由 `'Using'` 改为 `'使用工具'`，未知工具也显示中文。
+  3. `toolPreview()` 参数提取对齐 DSH 实际参数名（`file_path`/`command`/`pattern`/
+     `queries`/`objective`/`todos`/`questions`...），并保留旧的 `path`/`file` 等作兼容。
+  4. `TOOLS_NO_PREVIEW` 扩充（list_secrets/get_goal/job_list/list_agents/exit_plan_mode）。
+
+### 气泡分离（思考/命令/回复各自独立气泡）保持不变
+- **思考**：`🤔` 一条气泡，流式渐进更新（editMessageText）
+- **命令**：每个工具调用一条独立 `⚙️` 气泡，按"工具名+参数摘要"去重
+- **回复**：最终回答单独一条（或多条）干净消息，无前缀
+
+### 验证效果
+之前：`⚙️ Running echo "=== 系统时间 ==="...`
+现在：`⚙️ 执行命令：echo "=== 系统时间 ==="...`
+之前：`⚙️ Reading config.yaml`
+现在：`⚙️ 读取文件：config.yaml`
+之前：`⚙️ Editing src/index.ts`
+现在：`⚙️ 编辑文件：index.ts`
+
+### 部署
+- 源码：/vol1/1000/DeepSeek/dsh-veryIM
+- 构建：`npm run build:server`
+- 部署：cp lib/index.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28 — Telegram 消息样式升级为 MarkdownV2 富文本
 
 ### 为什么改

@@ -236,7 +236,7 @@ async function handleMsg(ch: any, msg: any) {
   // 工具结果独立气泡（可选显示）
   const shownResults = new Map<string, string>()
 
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < 600; i++) {
     if (chatGens.get(key) !== myGen) break   // 已被更新的消息取代 → 立即停止
     await sleep(1500)
     if (i % 2 === 0) await typing()
@@ -283,6 +283,25 @@ async function handleMsg(ch: any, msg: any) {
 
     const items = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
     if (!items.find((s: any) => s.sessionId === sid)?.running) break
+  }
+
+  // ── 补发阶段：循环退出后，确保最终回复不丢失 ──
+  // 可能原因：session 刚完成但 answer 事件还没回传；或循环超时但 session 已完成
+  if (!answerSent && chatGens.get(key) === myGen) {
+    for (let retry = 0; retry < 8; retry++) {
+      await sleep(2000)
+      const msgs = await dsh('session.history', { sessionId: sid })
+      const events = (msgs?.result?.value?.events || [])
+      const answer = collectAnswer(events, minTurn)
+      if (answer) {
+        answerSent = true
+        for (const chunk of splitMessages(answer)) await send(chunk, true)
+        break
+      }
+      // 如果 session 已结束且多次没拿到 answer，放弃
+      const items2 = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
+      if (!items2.find((s: any) => s.sessionId === sid)?.running && retry >= 2) break
+    }
   }
 
   // 超时仍在处理 → 更新时间消息上的提示

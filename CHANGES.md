@@ -1,5 +1,25 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第七次）— 修复最终回复丢失 + 超时补发
+
+### 为什么改
+主任反馈：对话最后以 ⚙️ 执行命令结尾，后面没有回复内容。
+根因：轮询循环退出后没有做最终回复的补发收集。session 完成时 answer 事件可能还没回传，
+导致 collectAnswer 没拿到回复就直接结束了。
+
+### 改了什么
+- `src/index.ts`：
+  1. **补发阶段**：轮询循环退出后，新增 8 次重试（每次 2 秒），确保最终回复不丢失：
+     - 每次重新拉取 session.history 检查 collectAnswer
+     - session 已结束且 2 次以上没拿到 answer → 放弃
+  2. **超时上限提升**：循环从 300 次（7.5 分钟）→ 600 次（15 分钟），
+     处理更复杂的多工具调用任务
+
+### 部署
+- 构建：`npm run build:server`
+- 部署：cp lib/index.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28（第六次）— 命令气泡单行显示 + 引用逻辑调整
 
 ### 为什么改

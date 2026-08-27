@@ -1,5 +1,30 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第十次）— 修复代理回退丢消息 bug
+
+### 为什么改
+测试发现：per-channel socks5 代理瞬时 TLS 掉线时，插件"回退系统代理"用的是**裸 fetch()**，
+而本环境 undici 全局 fetch 不读 `HTTPS_PROXY`，直接连 api.telegram.org:443 超时失败。
+此时 update 已被 ack（offset 已推进），消息被吞，用户收不到回复。
+系统 HTTPS 代理 vpn15.very.im:2888 本身可用，问题只在回退逻辑没用它。
+
+### 改了什么
+- `src/index.ts` 的 `tgRaw()`：
+  1. **per-channel 代理失败先重试一次**（间隔 1.5s），再做回退
+  2. **回退改用显式 `ProxyAgent(process.env.HTTPS_PROXY)`** 构造 dispatcher，
+     而不是裸 fetch（新增 `systemDispatcherFor()`，缓存系统代理 dispatcher）
+  3. 系统代理也失败时，最后才直连兜底
+- 三层容错顺序：per-channel（重试2次）→ 系统代理（显式）→ 直连
+
+### 验证
+`HTTPS_PROXY=https://vpn15.very.im:2888` 可用；per-channel 掉线后能正确回退系统代理，
+不再吞消息。
+
+### 部署
+- 构建：`npm run build:server`
+- 部署：cp lib/index.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28（第九次）— 回复实时渐进更新 + 网络容错
 
 ### 为什么改

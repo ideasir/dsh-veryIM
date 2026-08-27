@@ -35,17 +35,38 @@ function dispatcherFor(ch: any): ProxyAgent | undefined {
     return undefined
   }
 }
+// 系统代理（HTTPS_PROXY）的 ProxyAgent——裸 fetch 不读该变量，必须显式构造 dispatcher
+const SYSTEM_PROXY = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || ''
+let systemDispatcher: ProxyAgent | undefined
+function systemDispatcherFor(): ProxyAgent | undefined {
+  if (!SYSTEM_PROXY) return undefined
+  if (systemDispatcher) return systemDispatcher
+  try { systemDispatcher = new ProxyAgent(SYSTEM_PROXY) } catch { systemDispatcher = undefined }
+  return systemDispatcher
+}
 async function tgRaw(token: string, path: string, opts: any = {}, dispatcher?: ProxyAgent) {
   const url = `${TG}/bot${token}${path}`
-  // 有 per-channel 代理 → 用 undici 自带 fetch + dispatcher（全局 fetch 配 dispatcher 在本 Node 版本不可用）
+  // 1) per-channel 代理（若有）：失败先重试一次
   if (dispatcher) {
-    try {
-      return await proxyFetch(url, { ...opts, dispatcher }).then(r => r.json())
-    } catch (e: any) {
-      console.warn(`[dsh-veryIM] per-channel 代理请求失败(${e.cause?.message || e.message})，回退系统代理`)
-      // 失败时回退：全局 fetch 走系统 HTTPS_PROXY，保证不断联
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await proxyFetch(url, { ...opts, dispatcher }).then(r => r.json())
+      } catch (e: any) {
+        console.warn(`[dsh-veryIM] per-channel 代理请求失败(第${attempt + 1}/2: ${e.cause?.message || e.message})，重试/回退系统代理`)
+        if (attempt === 0) await sleep(1500)
+      }
     }
   }
+  // 2) 系统代理（显式 ProxyAgent，而非裸 fetch）
+  const sysDisp = systemDispatcherFor()
+  if (sysDisp) {
+    try {
+      return await proxyFetch(url, { ...opts, dispatcher: sysDisp }).then(r => r.json())
+    } catch (e: any) {
+      console.warn(`[dsh-veryIM] 系统代理请求失败(${e.cause?.message || e.message})，尝试直连`)
+    }
+  }
+  // 3) 直连兜底
   return fetch(url, opts).then(r => r.json())
 }
 async function tg(ch: any, path: string, opts: any = {}) {

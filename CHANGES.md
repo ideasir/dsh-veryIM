@@ -1,5 +1,25 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第四次）— 回复消息引用用户原文
+
+### 为什么改
+主任反馈：AI 回复的消息希望上方能引用用户发的那条原文，方便在群里看清是对哪条消息的响应。
+
+### 改了什么
+- `src/index.ts`：`handleMsg` 内的 `send()` 发送的所有消息（命令回复、思考气泡、
+  工具命令气泡、最终回复）都带 `reply_to_message_id: msgId`，引用用户发的那条消息，
+  Telegram 会自动在回复消息上方显示被引用消息的发送者和内容预览。
+  同时加 `allow_sending_without_reply: true` 保险——若被引用消息因时间久远等找不到，
+  不会报错，直接正常发送。
+
+### 验证效果
+在 Telegram 里给 bot 发消息后，所有机器人的回复消息上方都会出现被引用的原文小框。
+
+### 部署
+- 构建：`npm run build:server`
+- 部署：cp lib/index.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28（第三次）— 命令气泡改为中文显示 + 适配 DSH 实际工具名
 
 ### 为什么改

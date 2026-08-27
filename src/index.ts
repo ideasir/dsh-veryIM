@@ -137,15 +137,17 @@ async function handleMsg(ch: any, msg: any) {
 
   const send = async (t: string) => {
     const md = mdToTelegram(t)
+    // 引用用户发的那条消息（reply_to_message_id），回复内容上方显示所引用的原文
+    const base: any = { chat_id: chatId, text: md, parse_mode: 'MarkdownV2', reply_to_message_id: msgId, allow_sending_without_reply: true }
     let resp: any = await tg(ch, '/sendMessage', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: md, parse_mode: 'MarkdownV2' }),
+      body: JSON.stringify(base),
     })
     // MarkdownV2 解析失败（未闭合代码块/残留特殊字符）→ 回退纯文本
     if (!resp?.ok && /parse|entity|UTF|invalid/i.test(resp?.description || '')) {
       resp = await tg(ch, '/sendMessage', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: t }),
+        body: JSON.stringify({ ...base, text: t, parse_mode: undefined }),
       })
     }
     return resp

@@ -1,5 +1,32 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第八次）— 根因修复：最终回复采集逻辑
+
+### 为什么改
+第七次的补发方案仍没解决"对话以执行命令结尾、无最终回复"。深入排查真实会话事件流后
+找到根因：`collectAnswer` 依赖 `minTurn` 过滤 + 拼接所有 turn 的 text。而一个回合里
+AI 会输出**多个** text block（中间内容 + 最终回复）。当轮询第一次检测到 answer 非空时就
+`answerSent=true` 发送中间内容；且 `minTurn = 历史最大 turn + 1` 在 turn 编号不连续/重放时
+会过滤掉最终回复（模拟验证 `minTurn=13` 时 answer 为空）。
+
+### 改了什么
+- `src/index.ts`：
+  1. `collectAnswer(events)` **去掉 minTurn 参数和过滤**，改为只返回**最新一条
+     assistant/message 的 text**（即最终的回复）。用真实会话数据验证能正确拿到 1128 字的
+     最终回复。
+  2. `handleMsg` 轮询里改为**持续更新 `latestAnswer`**（不立即发送，避免中间 text 抢先），
+     等 session 结束后发送最终回复。
+  3. 补发阶段同样用最新逻辑，session 结束后确保最终回复送达。
+
+### 验证
+真实 telegram 会话（turn 12，74 步，41 次工具调用）最终回复 1128 字正常提取：
+"所有插件功能正常运行！✅ 还需要测试其他方面吗？"
+
+### 部署
+- 构建：`npm run build:server`
+- 部署：cp lib/index.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28（第七次）— 修复最终回复丢失 + 超时补发
 
 ### 为什么改

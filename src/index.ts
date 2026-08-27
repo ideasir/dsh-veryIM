@@ -233,6 +233,8 @@ async function handleMsg(ch: any, msg: any) {
   const shownTools = new Set<string>()
   // 是否已发出最终回复
   let answerSent = false
+  // 最新一条 assistant text（最终回复候选）
+  let latestAnswer = ''
   // 工具结果独立气泡（可选显示）
   const shownResults = new Map<string, string>()
 
@@ -274,25 +276,28 @@ async function handleMsg(ch: any, msg: any) {
       }
     }
 
-    // 3) 最终回复 → 单独一条干净消息（无前缀、无副作用）
-    const answer = collectAnswer(events, minTurn)
-    if (answer && !answerSent) {
-      answerSent = true
-      for (const chunk of splitMessages(answer)) await send(chunk, true)
-    }
+    // 3) 最终回复：持续追踪最新一条 assistant text，但先不发送——
+    //    AI 过程中会有多个 text，等 session 结束后只发最终的那条
+    const answer = collectAnswer(events)
+    if (answer) latestAnswer = answer
 
     const items = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
     if (!items.find((s: any) => s.sessionId === sid)?.running) break
   }
 
-  // ── 补发阶段：循环退出后，确保最终回复不丢失 ──
-  // 可能原因：session 刚完成但 answer 事件还没回传；或循环超时但 session 已完成
+  // 发送最终回复（session 已完成，latestAnswer 为最终回复）
+  if (!answerSent && latestAnswer && chatGens.get(key) === myGen) {
+    answerSent = true
+    for (const chunk of splitMessages(latestAnswer)) await send(chunk, true)
+  }
+
+  // ── 补发阶段：如果还没拿到最终回复，重试几次拉最新 assistant text ──
   if (!answerSent && chatGens.get(key) === myGen) {
     for (let retry = 0; retry < 8; retry++) {
       await sleep(2000)
       const msgs = await dsh('session.history', { sessionId: sid })
       const events = (msgs?.result?.value?.events || [])
-      const answer = collectAnswer(events, minTurn)
+      const answer = collectAnswer(events)
       if (answer) {
         answerSent = true
         for (const chunk of splitMessages(answer)) await send(chunk, true)
@@ -611,21 +616,23 @@ function summarizeThinking(text: string, maxLen = 150): string {
   return compact.slice(0, maxLen) + '…'
 }
 
-// 收集本回合的最终回复文本（assistant text block）
-function collectAnswer(events: any[], minTurn = 0): string {
-  const a: string[] = []
+// 收集最终回复文本：只取最新一条 assistant/message 的 text（即最终的回复）。
+// 不再按 minTurn 过滤——turn 编号不连续/重放时脆弱，这里直接取最新的 assistant text。
+function collectAnswer(events: any[]): string {
+  let last: string[] = []
   for (const ev of events) {
     const e = ev?.event
     if (!e) continue
-    const d = e.data || {}
-    if (minTurn > 0 && typeof d.turn === 'number' && d.turn < minTurn) continue
     if (e.type === 'assistant/message') {
+      const d = e.data || {}
+      const texts: string[] = []
       for (const b of (d.message?.content || [])) {
-        if (b?.type === 'text' && b.text) a.push(b.text)
+        if (b?.type === 'text' && b.text) texts.push(b.text)
       }
+      if (texts.length) last = texts
     }
   }
-  return a.join('\n\n').trim()
+  return last.join('\n\n').trim()
 }
 
 // ── HTTP 工具 ───────────────────────────────────────────

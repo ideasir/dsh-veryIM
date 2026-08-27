@@ -243,11 +243,12 @@ async function handleMsg(ch: any, msg: any) {
     const msgs = await dsh('session.history', { sessionId: sid })
     const events = (msgs?.result?.value?.events || [])
 
-    // 1) 思考 → 渐进填充一条 🤔 消息（不显示"思考："前缀，纯内容）
+    // 1) 思考 → 渐进填充一条 🤔 消息（只显示精简摘要，不显示完整推理）
     const thinking = collectThinking(events, minTurn)
     if (thinking && thinking !== shownThinking) {
       shownThinking = thinking
-      const text = '🤔 ' + thinking
+      const brief = summarizeThinking(thinking)
+      const text = '🤔 ' + brief
       if (thinkingMsgId) await edit(thinkingMsgId, text)
       else { const s = await send(text); if (s?.ok) thinkingMsgId = s.result.message_id }
     }
@@ -287,8 +288,8 @@ async function handleMsg(ch: any, msg: any) {
   // 超时仍在处理 → 更新时间消息上的提示
   const items = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
   if (chatGens.get(key) === myGen && items.find((s: any) => s.sessionId === sid)?.running) {
-    const base = shownThinking || ''
-    await edit(thinkingMsgId || 0, cap((base ? base : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
+    const brief = shownThinking ? summarizeThinking(shownThinking) : ''
+    await edit(thinkingMsgId || 0, cap((brief ? brief : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
   }
 }
 
@@ -577,6 +578,17 @@ function collectThinking(events: any[], minTurn = 0): string {
   }
   const full = (t.length ? t.join('\n\n') : '') + (live ? (t.length ? '\n\n' : '') + live : '')
   return full.trim()
+}
+
+// 精简摘要：只保留第一段、压缩换行、截断到 maxLen 字符
+function summarizeThinking(text: string, maxLen = 150): string {
+  if (!text) return ''
+  // 取第一个段落（双换行分割）
+  const firstPara = text.split(/\n{2,}/)[0].trim()
+  // 压缩连续空白为单个空格
+  const compact = firstPara.replace(/\s+/g, ' ').trim()
+  if (compact.length <= maxLen) return compact
+  return compact.slice(0, maxLen) + '…'
 }
 
 // 收集本回合的最终回复文本（assistant text block）

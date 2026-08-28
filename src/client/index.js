@@ -332,7 +332,7 @@ export function apply(ctx) {
               <span class="dsh-vm-dot on"></span>${TgSvg}
               <span style="font-size:13px;color:var(--dsw-alias-label-primary,#f9fafb)">@${esc(ch.botUsername || ch.name)}</span>
               ${ch.proxy ? '<span style="font-size:11px;color:var(--dsw-alias-label-tertiary,#999);background:var(--dsw-alias-bg-layer-1);border-radius:4px;padding:1px 6px">代理</span>' : ''}
-              ${ch.workspace ? '<span style="font-size:11px;color:var(--dsw-alias-label-tertiary,#999);background:var(--dsw-alias-bg-layer-1);border-radius:4px;padding:1px 6px">工作区</span>' : ''}
+              ${ch.workspace ? '<span title="' + esc(ch.workspace) + '" style="font-size:11px;color:var(--dsw-alias-label-tertiary,#999);background:var(--dsw-alias-bg-layer-1);border-radius:4px;padding:1px 6px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📁 ' + esc(ch.workspace) + '</span>' : ''}
               <span class="dsh-vm-ch-del" data-del-id="${esc(ch.id)}" style="cursor:pointer;color:var(--dsw-alias-label-tertiary,#999);margin-left:4px">✕</span>
             </div>`).join('') + `</div>`
         : ''

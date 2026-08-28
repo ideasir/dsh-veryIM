@@ -1,5 +1,14 @@
 # dsh-veryIM CHANGES.md
 
+## 2026-08-28（第十一次）— 渠道标签显示工作区路径
+### 改了什么
+- `src/client/index.js` 渠道标签：原来只显示"工作区"文字，改为显示工作区路径值（📁 + 路径）
+- 路径过长时 ellipsis 截断，鼠标悬停（title）显示完整路径
+### 部署
+- 构建：`npm run build:client`
+- 部署：cp lib/client.js → /root/.dsh/profiles/web/node_modules/dsh-veryIM/lib/
+- 重启：systemctl restart dsh
+
 ## 2026-08-28（第十次）— 修复代理回退丢消息 bug
 
 ### 为什么改

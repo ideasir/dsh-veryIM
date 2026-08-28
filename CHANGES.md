@@ -284,3 +284,180 @@ Hermes 电报插件用的是**动词短语**（"Running df -h"、"Reading config
 ### 踩坑
 - tool/call 事件的 `arguments` 可能是 JSON 字符串也可能是对象，toolPreview 里先 try JSON.parse
 - 动词映射要覆盖 DSH 常用工具（terminal/read_file/write_file/patch/search_files）+ veryIM 工具
+
+## 2026-08-28（第三次）— 修复多轮对话消息重复发送（深层 bug）
+
+### 表象
+机器人对话框消息重复发送——用户发第 2 条消息时，会把上一轮的回复重复发一遍。
+
+### 根因（深层）
+`collectAnswer()` 当初注释说"不按 minTurn 过滤（turn 编号脆弱）"，直接取 history 里
+**最新一条** assistant text。但多轮对话时，下一轮 poll 一开始 history 里最新一条
+assistant 消息还是**上一轮的回复**，被当成"最新回复"重复发送。
+而 `collectThinking()` 一直传 minTurn 所以思考不重复——两边逻辑不一致。
+
+### 修复
+1. `collectAnswer(events, minTurn)` 恢复按 turn 过滤：只取本回合（turn >= minTurn）的
+   assistant text，不再把历史回合回复当成本轮回复。
+2. 两个调用点（主轮询 L318、兜底重试 L336）都传 `minTurn`。
+   - 兜底重试尤其关键：之前不传 minTurn，session 结束兜底时会把历史回复补发一遍 = 重复的第二个来源。
+
+### 验证
+多轮对话测试：第 2 轮开始时不再重复第 1 轮回复，只显示本轮的新回复。
+
+### 踩坑
+- 两处 `collectAnswer` 调用都必须传 minTurn，漏一处都会重复（主轮询 OR 兜底）。
+- 之前"不按 turn 过滤"是错误权衡——turn 编号脆弱的代价远小于重复发送。
+
+## 2026-08-28（第四次）— 去掉思考内容显示
+
+### 为什么改
+主任反馈：不要显示思考的内容。之前轮询时会发一条「🤔 思考摘要」消息，主任不需要看到推理过程。
+
+### 改了什么
+- `src/index.ts` 轮询逻辑：删除思考气泡（collectThinking 的 🤔 消息）。
+  现在只显示：工具调用 ⚙️ 气泡 + 最终回复一条。
+- `thinkingMsgId`/`shownThinking` 变量删除，改为 `interruptMsgId`（仅保留打断消息的引用）。
+- 超时提示改为更新打断消息：`⏳ 处理中…（仍在处理中，发送 /cancel 可打断）`，不再依赖思考。
+- `collectThinking`/`summarizeThinking` 函数保留未删（无调用，无害），后续如需恢复可用。
+
+### 现在显示顺序
+1. （如有打断）⏸️ 已打断上一条
+2. ⚙️ Running xxx（每个工具独立气泡）
+3. 最终回复单独一条干净消息
+
+## 2026-08-28（第五次）— 去掉思考内容显示
+
+### 为什么改
+主任反馈：不要显示思考的内容。之前轮询时会发一条 `🤔 思考中：...` 消息，主任不需要看这个。
+
+### 改了什么
+- 删除思考气泡：不再发送/更新 `🤔 摘要` 消息
+- 删除 `thinkingMsgId`/`shownThinking` 变量
+- 超时提示改为更新打断消息（`interruptMsgId`），不再依赖思考内容
+- `collectThinking` / `summarizeThinking` 函数保留（无害，未来可复用）
+
+### 现在的显示流
+用户发消息 → （如有打断消息）→ 每个工具 ⚙️ 独立气泡 → 最终回复单独一条
+没有 🤔 消息。
+
+## 2026-08-28（第六次）— 回复气泡底部显示当前模型
+
+### 为什么改
+主任需求：回复气泡最下面要有一个固定格式，显示当前 IM 渠道所用的模型。
+
+### 数据来源
+DSH 的 `assistant/message` 事件里 `message.source.model` 字段存有当前回复所用的模型名
+（如 `aplan`、`deepseek-v4-flash` 等），直接从 history 事件里提取。
+
+### 改了什么
+1. 新增 `collectModel(events, minTurn)` 函数：
+   遍历本回合的 `assistant/message` 事件，提取 `message.source.model`，
+   与 `collectAnswer` 用同样的 `minTurn` 过滤（只看本回合）。
+2. 主轮询 + 兜底重试两处回复发送逻辑：回复正文 + footer 拼接。
+   footer 格式：`────────\n🤖 ${model}`
+3. footer 在 MarkdownV2 下会被转义为 `────────\n🤖 aplan`（不显示分隔线），
+   Telegram MarkdownV2 无水平线语法，但 `────────` 字符本身不需要转义（Unicode 横线）。
+
+### 显示效果
+```
+（AI 回复内容）
+
+────────
+🤖 aplan
+```
+
+### 踩坑
+- `message.source` 只在 `assistant/message` 事件有，`assistant/chunk` 没有——所以只能从最终 message 里取，不能从 streaming chunk 里实时取。
+- footer 需要在 edit 时也更新（因为 model 在回复过程中可能不变，但 edit 覆盖时需要整体拼接）。
+
+## 2026-08-28（第七次）— 思考气泡：显示进度 + 回复出现后自动消失
+
+### 为什么改
+主任反馈：不显示思考内容的话，卡太久用户看不到进度。但思考内容不需要留存——回复出现后思考气泡应该消失。
+需求：思考过程**临时显示**，回复出现后**自动删除**。
+
+### 改了什么
+1. **恢复思考气泡显示**（步骤 1）：`collectThinking` + `summarizeThinking` 重新启用，
+   轮询时渐进更新一条 `🤔 摘要` 消息，让用户看到当前在做什么。
+2. **回复出现后删除思考气泡**（新增 `del` 函数）：
+   - `del(messageId)` → 调用 Telegram `deleteMessage` API
+   - 主轮询回复出现后：`del(thinkingMsgId)` 立即删除思考气泡
+   - 兜底补发回复后：同样删除思考气泡
+3. **超时提示保留思考内容**：超时时更新思考气泡为 `🤔 摘要 + ⏳仍在处理中`，
+   不删除（因为此时还没有回复，不能删）。
+4. 删除后 `thinkingMsgId = null` 防止重复删除。
+
+### 现在的流程
+用户发消息 → 🤔 思考中… → ⚙️ Running xxx → ⚙️ Reading xxx → （回复出现）→ 🤔 消息消失
+→ 最终回复一条干净消息（底部带 🤖 模型名）
+
+### 踩坑
+- Telegram bot 只能删自己发的消息，且 bot 必须在群组有删消息权限。
+- `del()` 必须 `.catch(() => {})` 吞错误——聊天场景删消息偶尔 403（消息已不存在）
+  不应中断流程。
+
+## 2026-08-28（第八次）— 回复气泡不覆盖：每条 assistant text 独立气泡
+
+### 为什么改
+主任反馈：回复内容的气泡会变化内容。第一次出现中间回复（如"好的，我来查看..."），
+然后继续执行命令，最后第一条气泡被 edit 覆盖成最终回复——用户看到"气泡内容会变"，
+很混乱。主任要求：中间回复和最终回复各自独立气泡，互不覆盖。
+
+### 根因
+之前 `collectAnswer` 只取**最新一条** assistant text，然后用 `answerMsgId` 去 edit
+覆盖——所有回复都挤在同一条气泡里，中间回复被最终回复覆盖。
+
+### 改了什么
+1. `collectAnswer(events)` → `collectAnswers(events)`：返回 `Array<{ turn, text }>`，
+   每条 assistant message 独立元素（含中间回复）。
+2. 主轮询：遍历 `collectAnswers` 结果，每条用 `send()` 独立气泡（不 edit），
+   用 `shownAnswerIds` (Set<number>) 按 turn 去重。
+3. 回复出现后仍删除思考气泡（`del(thinkingMsgId)`）。
+4. 兜底逻辑：session 结束后只补发**未发送过的**回复（`unsent = answers.filter(a => !shownAnswerIds.has(a.turn))`）。
+5. 清理旧变量：`answerMsgId`/`shownAnswer`/`collectAnswer` 全部删除。
+
+### 现在的流程
+用户发消息 → 🤔 思考中… → ⚙️ Running xxx → ⚙️ Reading xxx
+→ （如有中间回复）好的，我来查看... （独立气泡）
+→ （最终回复）最终答案（独立新气泡）+ 🤖 模型名
+→ 🤔 消息消失
+
+### 踩坑
+- 兜底逻辑引用了已删除的 `collectAnswer`/`shownAnswer`/`answerMsgId` →
+  tsc 不报错（`--noEmitOnError false` + TS2688 之前跳过），
+  但运行时会 ReferenceError 崩溃。改为 `collectAnswers` + `shownAnswerIds` 后修复。
+- 兜底逻辑从"重试 8 次等回复"改为"立即补发未发送回复"——
+  因为主轮询已经在 session running 时抓取所有回复，兜底只是处理极少数竞态。
+
+## 2026-08-28（第九次）— 修复最终回复不显示 + 回复去重键升级
+
+### 为什么改
+主任反馈两个问题：
+1. 执行命令的工具气泡想单行显示（实际已是单行——截图里多行是"每条命令独立气泡"）
+2. **最终回复不显示**——执行完所有命令后没有总结回复
+
+### 根因（最终回复不显示）
+DSH 的 assistant/message 事件里，**同一个 turn 有多个 step**（step=1 中间回复，
+step=2 补充说明，step=3 最终报告）。之前的 `collectAnswers` 用 `turn` 去重，
+导致：turn=6 step=1 发出后 shownAnswerIds={6}，step=2 和 step=3 **全被跳过**。
+最终回复（step=3）永远发不出来。
+
+### 改了什么
+1. `collectAnswers` 返回 `[{ key, text }]`，key = `"turn:step"`（唯一键），
+   不再只用 turn。同一个 turn 内不同 step 是不同回复，全部独立发送。
+2. `shownAnswerIds` 从 `Set<number>` 改为 `Set<string>`（存 key）。
+3. 主轮询 + 兜底逻辑同步改为用 `a.key` 去重。
+4. 工具气泡：确认 `toolLabel` 已有 `.replace(/\n/g,' ').replace(/\s+/g,' ')` 压单行，
+   命令本身不换行；多条命令是独立气泡，属正常设计。
+
+### 现在的行为
+- 中间回复（"好的，我来查看..."）→ 独立气泡
+- 补充说明（"我再深入看看..."）→ 独立气泡
+- 最终回复（"系统盘占用分析完成！..."）→ 独立气泡 ← 之前被吞了，现在正常
+- 每条都带 🤖 模型名 footer
+
+### 踩坑
+- DSH 事件模型：turn 是"对话回合"，step 是"回合内的执行步骤"。
+  一个 turn 里可能有多条 assistant/message（step 递增），
+  去重必须用 turn+step 组合，不能只用 turn。

@@ -199,6 +199,11 @@ async function handleMsg(ch: any, msg: any) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
   }).catch(() => {})
+  // 删除消息（用于回复出现后删掉思考气泡）
+  const del = (messageId: number) => tg(ch, '/deleteMessage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  }).catch(() => {})
 
   // 命令菜单
   if (text === '/menu' || text === '/help' || text === '/commands' || text === '/list') { await send(HELP_TEXT); return }
@@ -255,18 +260,13 @@ async function handleMsg(ch: any, msg: any) {
     return
   }
 
-  // ── 轮询：思考一条、每条命令独立气泡、最终回复单独一条 ──
-  // 思考/工具调用：渐进更新一条消息
-  let thinkingMsgId: number | null = sentId  // 打断消息或思考消息的 id
+  // ── 轮询：思考气泡 + 每条命令独立气泡 + 回复各自独立 ──
+  let thinkingMsgId: number | null = sentId  // 打断消息或思考消息 id
   let shownThinking = ''
   // 已发出气泡的工具调用（按"工具名+参数摘要"去重，避免重复发同一条）
   const shownTools = new Set<string>()
-  // 回复消息 id（渐进更新一条 💬 消息，最终停在最终回复）
-  let answerMsgId: number | null = null
-  // 已显示的回复内容
-  let shownAnswer = ''
-  // 工具结果独立气泡（可选显示）
-  const shownResults = new Map<string, string>()
+  // 已发送的回复 key（每条 assistant text 独立气泡，不 edit 覆盖）
+  const shownAnswerIds = new Set<string>()
 
   for (let i = 0; i < 600; i++) {
     if (chatGens.get(key) !== myGen) break   // 已被更新的消息取代 → 立即停止
@@ -282,7 +282,7 @@ async function handleMsg(ch: any, msg: any) {
       continue
     }
 
-    // 1) 思考 → 渐进填充一条 🤔 消息（只显示精简摘要，不显示完整推理）
+    // 1) 思考 → 渐进填充一条 🤔 消息（让用户看到进度不干等；回复出现后删除）
     const thinking = collectThinking(events, minTurn)
     if (thinking && thinking !== shownThinking) {
       shownThinking = thinking
@@ -313,46 +313,45 @@ async function handleMsg(ch: any, msg: any) {
       }
     }
 
-    // 3) 最终回复：渐进更新一条 💬 消息——AI 每次输出 text 就实时更新，
-    //    用户随时能看到回复内容，最终停在最终回复
-    const answer = collectAnswer(events)
-    if (answer && answer !== shownAnswer) {
-      shownAnswer = answer
-      if (answerMsgId) await edit(answerMsgId, cap(answer, MAX_MSG)).catch(() => {})
-      else { const s = await send(answer, true); if (s?.ok) answerMsgId = s.result.message_id }
+    // 3) 回复气泡：每条 assistant text 独立气泡，绝不 edit 覆盖。
+    //    中间回复（"好的，我来查看..."）和最终回复各自一条，互不替换
+    const answers = collectAnswers(events, minTurn)
+    for (const a of answers) {
+      if (shownAnswerIds.has(a.key)) continue  // 已发过这条
+      // 底部固定格式行：显示当前 IM 渠道所用的模型
+      const model = collectModel(events, minTurn)
+      const footer = model ? `\n\n────────\n🤖 ${model}` : ''
+      const display = a.text + footer
+      const s = await send(display, true)
+      if (s?.ok) shownAnswerIds.add(a.key)
     }
+    // ★ 回复出现后立即删除思考气泡（第一条回复发出即删）
+    if (shownAnswerIds.size > 0 && thinkingMsgId) { await del(thinkingMsgId); thinkingMsgId = null }
 
     let items: any[] = []
     try { items = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch (e: any) { console.warn(`[dsh-veryIM] ${ch.name} session.list 失败: ${e.message}`) }
     if (!items.find((s: any) => s.sessionId === sid)?.running) break
   }
 
-  // ── 兜底：若全程没显示过回复（极少数竞态），session 结束后补发最终回复 ──
-  if (!shownAnswer && chatGens.get(key) === myGen) {
-    for (let retry = 0; retry < 8; retry++) {
-      await sleep(2000)
-      let events: any[] = []
-      try { const msgs = await dsh('session.history', { sessionId: sid }); events = (msgs?.result?.value?.events || []) } catch { continue }
-      const answer = collectAnswer(events)
-      if (answer) {
-        const s = await send(answer, true)
-        if (s?.ok) answerMsgId = s.result.message_id
-        shownAnswer = answer
-        break
-      }
-      // 如果 session 已结束且多次没拿到 answer，放弃
-      let items2: any[] = []
-      try { items2 = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch { /* 继续重试 */ }
-      if (!items2.find((s: any) => s.sessionId === sid)?.running && retry >= 2) break
-    }
+  // ── 兜底：若全程没显示过回复（极少数竞态），session 结束后补发所有未发送的回复 ──
+  const lastEvents: any[] = []
+  try { const msgs = await dsh('session.history', { sessionId: sid }); lastEvents.push(...(msgs?.result?.value?.events || [])) } catch { /* ignore */ }
+  const answers = collectAnswers(lastEvents, minTurn)
+  const unsent = answers.filter(a => !shownAnswerIds.has(a.key))
+  for (const a of unsent) {
+    const model = collectModel(lastEvents, minTurn)
+    const footer = model ? `\n\n────────\n🤖 ${model}` : ''
+    const s = await send(a.text + footer, true)
+    if (s?.ok) shownAnswerIds.add(a.key)
   }
+  if (shownAnswerIds.size > 0 && thinkingMsgId) { await del(thinkingMsgId); thinkingMsgId = null }
 
-  // 超时仍在处理 → 更新时间消息上的提示
+  // 超时仍在处理 → 更新思考气泡上的提示
   let sitems: any[] = []
   try { sitems = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch { /* ignore */ }
   if (chatGens.get(key) === myGen && sitems.find((s: any) => s.sessionId === sid)?.running) {
     const brief = shownThinking ? summarizeThinking(shownThinking) : ''
-    await edit(thinkingMsgId || 0, cap((brief ? brief : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
+    await edit(thinkingMsgId || 0, cap((brief ? '🤔 ' + brief : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
   }
 }
 
@@ -655,23 +654,48 @@ function summarizeThinking(text: string, maxLen = 150): string {
   return compact.slice(0, maxLen) + '…'
 }
 
-// 收集最终回复文本：只取最新一条 assistant/message 的 text（即最终的回复）。
-// 不再按 minTurn 过滤——turn 编号不连续/重放时脆弱，这里直接取最新的 assistant text。
-function collectAnswer(events: any[]): string {
-  let last: string[] = []
+// 收集本回合的所有 assistant text（按出现顺序，每条独立）
+// 返回 [{ key, text }] —— 中间回复和最终回复都是独立元素
+// key = "turn:step"，同一个 turn 内不同的 step 是不同的回复，都要发
+function collectAnswers(events: any[], minTurn = 0): Array<{ key: string; text: string }> {
+  const out: Array<{ key: string; text: string }> = []
   for (const ev of events) {
     const e = ev?.event
     if (!e) continue
+    const d = e.data || {}
+    if (minTurn > 0 && typeof d.turn === 'number' && d.turn < minTurn) continue
     if (e.type === 'assistant/message') {
-      const d = e.data || {}
       const texts: string[] = []
       for (const b of (d.message?.content || [])) {
         if (b?.type === 'text' && b.text) texts.push(b.text)
       }
-      if (texts.length) last = texts
+      if (texts.length) {
+        const joined = texts.join('\n\n').trim()
+        if (joined) {
+          const turn = typeof d.turn === 'number' ? d.turn : -1
+          const step = typeof d.step === 'number' ? d.step : 0
+          out.push({ key: `${turn}:${step}`, text: joined })
+        }
+      }
     }
   }
-  return last.join('\n\n').trim()
+  return out
+}
+
+// 收集本回合回复所用的模型名（assistant/message 的 message.source.model）
+function collectModel(events: any[], minTurn = 0): string {
+  let model = ''
+  for (const ev of events) {
+    const e = ev?.event
+    if (!e) continue
+    const d = e.data || {}
+    if (minTurn > 0 && typeof d.turn === 'number' && d.turn < minTurn) continue
+    if (e.type === 'assistant/message') {
+      const src = d.message?.source || {}
+      if (src.kind === 'model' && src.model) model = src.model
+    }
+  }
+  return model
 }
 
 // ── HTTP 工具 ───────────────────────────────────────────

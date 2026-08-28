@@ -1,5 +1,5 @@
 /** dsh-veryIM 客户端 v2 — 完整 UI：卡片对齐 + 代理/工作区 + 智能检测 + 大按钮 */
-const VERSION = '0827-0.1.1'
+const VERSION = '0828-0.1.1'
 const REPO = 'https://github.com/ideasir/dsh-veryIM'
 
 // ── 弹窗 CSS ──

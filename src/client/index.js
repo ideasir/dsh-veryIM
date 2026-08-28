@@ -1,5 +1,5 @@
 /** dsh-veryIM 客户端 — 纯 JS，弹窗用 innerHTML，卡片用 React */
-const VERSION = '0827-0.2.0'
+const VERSION = '0828-0.2.0'
 const REPO = 'https://github.com/ideasir/dsh-veryIM'
 
 const CSS = `
@@ -16,9 +16,9 @@ const CSS = `
 .dsh-vm-mf small{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .dsh-vm-mft{padding:12px 16px;border-top:1px solid var(--dsw-alias-border-l2);display:flex;justify-content:flex-end;gap:8px}
 .dsh-vm-modal button.dsh-vm-b{padding:7px 16px !important;border:1px solid var(--dsw-alias-border-l2,#333) !important;border-radius:8px !important;background:var(--dsw-alias-bg-layer-1,#2c2c2e) !important;color:var(--dsw-alias-label-primary,#f9fafb) !important;font-size:13px !important;line-height:1.4 !important;cursor:pointer !important;appearance:none;font-family:inherit}
-.dsh-vm-modal button.dsh-vm-b:hover{background:var(--dsw-alias-bg-layer-2,#3a3a3c) !important}
+.dsh-vm-modal button.dsh-vm-b:not(.dsh-vm-bp):hover{background:var(--dsw-alias-bg-layer-2,#3a3a3c) !important}
 .dsh-vm-modal button.dsh-vm-bp{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary,#4c78ff)) !important;color:var(--dsw-alias-label-primary-inverted,#fff) !important;border-color:transparent !important}
-.dsh-vm-modal button.dsh-vm-bp:hover{opacity:.9}
+.dsh-vm-modal button.dsh-vm-bp:hover{filter:brightness(1.08)}
 .dsh-vm-fb{font-size:12px;padding:8px 12px;border-radius:8px;margin-top:4px}
 .dsh-vm-fb-ok{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 10%,transparent);color:var(--dsw-alias-state-success-primary,#22c55e)}
 .dsh-vm-fb-er{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ef4444) 10%,transparent);color:var(--dsw-alias-state-error-primary,#ef4444)}

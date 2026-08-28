@@ -1,6 +1,6 @@
 {
   "name": "dsh-veryim",
-  "version": "0.1.0-rc.2",
+  "version": "0828-0.2.0",
   "description": "即时通讯渠道插件——把 Telegram 等 IM 接入 DSH",
   "main": "lib/index.js",
   "exports": {

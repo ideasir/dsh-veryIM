@@ -712,3 +712,19 @@ webui-settings 路由：
 - 无死代码、无 TODO/FIXME、版本号 0829-0.2.1 一致
 - DSH 重启正常、渠道健康
 - 产物确认 sweepMaps/2400/workspaceId 已部署
+
+## 2026-08-29 — 修复：会话无法创建（createSessionLocked workspaceId+cwd 冲突）
+
+### 问题
+清空会话记录后，bot 无法创建新对话，报「无法创建对话会话」。
+
+### 根因
+createSessionLocked 修复 workspaceId 时，payload 同时传了 `{ workspaceId, cwd }`，而 DSH 的 session.create 只接受其中一个（同时传报 bad-request: "accepts workspaceId or cwd, not both"）。
+
+### 修复
+解析到渠道工作区 workspaceId 时，payload 只传 `{ workspaceId }`（DSH 自动带入工作区路径）；否则退回纯 `{ cwd }`。
+
+### 验证
+- 只传 workspaceId 创建会话成功
+- 会话正确 attach 进电报工作区（sessionIds=1）
+- DSH 重启正常

@@ -675,12 +675,13 @@ function createSessionLocked(key: string, ch: any): Promise<string> {
   const p = (async () => {
     const cwd = ch?.workspace && ch.workspace.trim() ? ch.workspace.trim() : '/root/DSH'
     let payload: any = { cwd }
-    // 尝试解析渠道工作区 id；失败/不存在则退回纯 cwd（DSH 默认放 DSH 工作区）
+    // 尝试解析渠道工作区 id；DSH 的 session.create 只接受 workspaceId 或 cwd（不能同时传），
+    // 解析到 workspaceId 就用它（DSH 自动带入工作区路径），否则退回 cwd。
     try {
       const wsList = await dsh('workspace.list', {})
       const wsItems: any[] = wsList?.result?.value?.items ?? []
       const targetWs = wsItems.find((w: any) => w.path === cwd)
-      if (targetWs?.workspaceId) payload = { workspaceId: targetWs.workspaceId, cwd }
+      if (targetWs?.workspaceId) payload = { workspaceId: targetWs.workspaceId }
     } catch { /* 忽略，退回 cwd 路径创建 */ }
     const r = await dsh('session.create', payload)
     return r?.result?.value?.sessionId as string

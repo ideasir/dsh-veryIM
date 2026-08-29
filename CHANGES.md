@@ -593,3 +593,23 @@ webui-settings 路由：
 ### 验证
 - Telegram getMyCommands 返回 ['menu', 'new', 'cancel'] ✅
 - 渠道正常启动，无错误日志
+
+## 2026-08-29 — P1 媒体下行（agent 出图 → 发回 Telegram）
+
+### 为什么
+审查发现体验最大的洞：agent 调用 makemake_image 生成的图片根本到不了用户手上（只能发文字描述）。
+
+### 方案
+1. 事件流里 assistant/message 或 tool/result 的 content blocks 中提取 type=image 的 attachment
+2. 通过 DSH 附件桥路由 `http://127.0.0.1:3080/plugins/dsh-makemake/image?attachmentId=` 读取真实图片字节（makemake 的 readImage 能读任意 DSH content-addressed attachment）
+3. 用 sendPhoto + multipart/form-data 发给用户（走 per-channel → 系统 → 直连三层代理容错）
+
+### 改了什么（src/index.ts）
+- 新增 collectMedia()：从事件流提取图片附件（去重）
+- 新增 sendPhoto()：读 attachment → multipart sendPhoto，三层代理容错
+- 轮询循环新增第 4 步：媒体下行（按 attachmentId 去重，防重复发）
+
+### 验证
+- 真实 attachment（sha256:... 1024×1024 JPEG 124KB）读取成功
+- sendPhoto 全链路测试成功，图片已发到 Telegram（msg_id=1503）
+- 编译通过、渠道正常

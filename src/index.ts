@@ -200,6 +200,34 @@ async function handleMsg(ch: any, msg: any) {
     }
     return null
   }
+  // 发送图片：通过 DSH 附件路由读取 attachment 字节 → sendPhoto（multipart/form-data）
+  const sendPhoto = async (att: { attachmentId: string; mediaType: string; name?: string }, caption?: string) => {
+    try {
+      // 同机调 DSH 的 attachment 桥路由（makemake 注册的 /plugins/dsh-makemake/image 支持读任意 attachment）
+      const imgRes = await fetch(`http://127.0.0.1:3080/plugins/dsh-makemake/image?attachmentId=${encodeURIComponent(att.attachmentId)}`, { redirect: 'error' })
+      if (!imgRes.ok) { console.warn(`[dsh-veryIM] ${ch.name} 读取附件失败: HTTP ${imgRes.status}`); return null }
+      const buf = Buffer.from(await imgRes.arrayBuffer())
+      if (buf.length === 0) return null
+      const form = new FormData()
+      const ext = (att.mediaType || 'image/jpeg').split('/')[1]?.replace('jpeg', 'jpg') || 'jpg'
+      form.append('chat_id', String(chatId))
+      form.append('photo', new Blob([new Uint8Array(buf)], { type: att.mediaType || 'image/jpeg' }), `${att.name || 'image'}.${ext}`)
+      if (caption) form.append('caption', mdToTelegram(caption))
+      const url = `https://api.telegram.org/bot${ch.botToken}/sendPhoto`
+      // 走代理容错：per-channel → 系统 → 直连
+      let lastErr: any = null
+      const disp = dispatcherFor(ch)
+      if (disp) { try { return await (await proxyFetch(url, { method: 'POST', body: form, dispatcher: disp })).json() } catch (e: any) { lastErr = e } }
+      const sysDisp = systemDispatcherFor()
+      if (sysDisp) { try { return await (await proxyFetch(url, { method: 'POST', body: form, dispatcher: sysDisp })).json() } catch (e: any) { lastErr = e } }
+      try { return await (await fetch(url, { method: 'POST', body: form })).json() } catch (e: any) { lastErr = e }
+      if (lastErr) console.warn(`[dsh-veryIM] ${ch.name} sendPhoto 网络失败: ${lastErr.cause?.message || lastErr.message}`)
+      return null
+    } catch (e: any) {
+      console.warn(`[dsh-veryIM] ${ch.name} sendPhoto 失败: ${e.message}`)
+      return null
+    }
+  }
   const edit = async (messageId: number, t: string) => {
     const md = mdToTelegram(t)
     let resp: any = await tg(ch, '/editMessageText', {
@@ -298,6 +326,8 @@ async function handleMsg(ch: any, msg: any) {
   const shownTools = new Set<string>()
   // 已发送的回复 key（每条 assistant text 独立气泡，不 edit 覆盖）
   const shownAnswerIds = new Set<string>()
+  // 已发送的图片附件（按 attachmentId 去重，避免重复发图）
+  const shownMedia = new Set<string>()
 
   for (let i = 0; i < 600; i++) {
     if (chatGens.get(key) !== myGen) break   // 已被更新的消息取代 → 立即停止
@@ -358,6 +388,15 @@ async function handleMsg(ch: any, msg: any) {
     }
     // ★ 回复出现后立即删除思考气泡（第一条回复发出即删）
     if (shownAnswerIds.size > 0 && thinkingMsgId) { await del(thinkingMsgId); thinkingMsgId = null }
+
+    // 4) 媒体下行：回合内出现的图片附件 → sendPhoto 发给用户（按 attachmentId 去重）
+    const media = collectMedia(events, minTurn)
+    for (const att of media) {
+      if (shownMedia.has(att.attachmentId)) continue
+      shownMedia.add(att.attachmentId)
+      // caption 用附件名（如果有），否则空
+      await sendPhoto(att, att.name ? `📎 ${att.name}` : undefined)
+    }
 
     let items: any[] = []
     try { items = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch (e: any) { console.warn(`[dsh-veryIM] ${ch.name} session.list 失败: ${e.message}`) }
@@ -709,6 +748,29 @@ function collectAnswers(events: any[], minTurn = 0): Array<{ key: string; text: 
           const turn = typeof d.turn === 'number' ? d.turn : -1
           const step = typeof d.step === 'number' ? d.step : 0
           out.push({ key: `${turn}:${step}`, text: joined })
+        }
+      }
+    }
+  }
+  return out
+}
+
+// 收集回合内出现的图片附件（assistant/message content 里的 image block）
+function collectMedia(events: any[], minTurn = 0): Array<{ attachmentId: string; mediaType: string; name?: string }> {
+  const out: Array<{ attachmentId: string; mediaType: string; name?: string }> = []
+  const seen = new Set<string>()
+  for (const ev of events) {
+    const e = ev?.event
+    if (!e) continue
+    const d = e.data || {}
+    if (minTurn > 0 && typeof d.turn === 'number' && d.turn < minTurn) continue
+    if (e.type === 'assistant/message' || e.type === 'tool/result') {
+      const blocks = Array.isArray(d.message?.content) ? d.message.content
+        : Array.isArray(d.content) ? d.content : []
+      for (const b of blocks) {
+        if (b?.type === 'image' && b.attachment?.attachmentId && !seen.has(b.attachment.attachmentId)) {
+          seen.add(b.attachment.attachmentId)
+          out.push({ attachmentId: b.attachment.attachmentId, mediaType: b.attachment.mediaType || '', name: b.attachment.name })
         }
       }
     }

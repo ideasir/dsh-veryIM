@@ -75,9 +75,13 @@ async function tg(ch: any, path: string, opts: any = {}) {
 }
 
 // ── DSH RPC（直连 localhost，NO_PROXY 保护） ─────────────
+// 端口可从环境变量 VERYIM_DSH_PORT 覆盖（默认 3080），避免 DSH 换端口插件全挂
+const DSH_BASE = process.env.VERYIM_DSH_PORT
+  ? `http://127.0.0.1:${process.env.VERYIM_DSH_PORT}`
+  : 'http://127.0.0.1:3080'
 async function dsh(method: string, payload: any) {
   try {
-    const r = await fetch(`http://127.0.0.1:3080/api/${method}`, {
+    const r = await fetch(`${DSH_BASE}/api/${method}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'client-request', rpcId: `vi-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, method, payload }),
     })
@@ -144,8 +148,8 @@ async function pollLoop(ch: any, signal: AbortSignal) {
         // 注意：from.id 缺失也拒绝（防恶意构造无 from 的消息绕过白名单）
         const wl = Array.isArray(ch.allowlist) ? ch.allowlist : []
         if (wl.length > 0 && (!msg.from?.id || !wl.includes(msg.from.id))) continue
-        // 媒体消息（图/文件/语音/视频）→ 上行处理；无媒体的纯文本 → 正常对话
-        const hasMedia = !!(msg.photo || msg.document || msg.voice || msg.video || msg.audio)
+        // 媒体消息（图/文件/语音/视频/贴纸/GIF）→ 上行处理；无媒体的纯文本 → 正常对话
+        const hasMedia = !!(msg.photo || msg.document || msg.voice || msg.video || msg.audio || msg.sticker || msg.animation)
         if (hasMedia) { handleMediaMsg(ch, msg).catch(e => log(`handleMediaMsg err: ${e.message}`)); continue }
         if (!msg?.text) continue
         handleMsg(ch, msg).catch(e => log(`handleMsg err: ${e.message}`))
@@ -158,10 +162,21 @@ async function pollLoop(ch: any, signal: AbortSignal) {
   }
 }
 
+// persistOffset 节流：内存立即更新，落盘 5 秒防抖批量写（高频消息不每条约写一次 config.json）
+const persistTimers = new Map<string, NodeJS.Timeout>()
 function persistOffset(ch: any) {
+  // 先立即更新内存里的 channel.lastUpdateId（同进程内持久）
   const cfg = loadCfg()
   const ex = cfg.channels.find((c: any) => c.id === ch.id)
-  if (ex) { ex.lastUpdateId = ch.lastUpdateId; saveCfg(cfg) }
+  if (!ex) return
+  ex.lastUpdateId = ch.lastUpdateId
+  // 防抖：5 秒内的多次调用合并为一次 saveCfg
+  const prev = persistTimers.get(ch.id)
+  if (prev) clearTimeout(prev)
+  persistTimers.set(ch.id, setTimeout(() => {
+    persistTimers.delete(ch.id)
+    saveCfg(cfg)
+  }, 5000))
 }
 
 // 模块级：发送图片（媒体下行），供 handleMsg / handleMediaMsg 共用
@@ -171,7 +186,7 @@ async function sendPhotoModule(
   caption?: string,
 ): Promise<any | null> {
   try {
-    const imgRes = await fetch(`http://127.0.0.1:3080/plugins/dsh-makemake/image?attachmentId=${encodeURIComponent(att.attachmentId)}`, { redirect: 'error' })
+    const imgRes = await fetch(`${DSH_BASE}/plugins/dsh-makemake/image?attachmentId=${encodeURIComponent(att.attachmentId)}`, { redirect: 'error' })
     if (!imgRes.ok) { console.warn(`[dsh-veryIM] ${ch.name} 读取附件失败: HTTP ${imgRes.status}`); return null }
     const buf = Buffer.from(await imgRes.arrayBuffer())
     if (buf.length === 0) return null
@@ -202,10 +217,15 @@ async function tgDownloadFile(ch: any, fileId: string): Promise<Buffer | null> {
     const resp = await tg(ch, `/getFile?file_id=${encodeURIComponent(fileId)}`)
     if (!resp?.ok || !resp.result?.file_path) return null
     const url = `https://api.telegram.org/file/bot${ch.botToken}/${resp.result.file_path}`
-    const bufRes = await fetch(url, { redirect: 'error', dispatcher: dispatcherFor(ch) }).catch(() => null)
-    if (!bufRes || !bufRes.ok) return null
-    const buf = Buffer.from(await bufRes.arrayBuffer())
-    return buf.length > 0 ? buf : null
+    // 三层代理降级：per-channel → 系统代理 → 直连（与 sendPhoto 一致，代理抖动不丢文件）
+    let lastErr: any = null
+    const disp = dispatcherFor(ch)
+    if (disp) { try { const r = await proxyFetch(url, { redirect: 'error', dispatcher: disp }); if (r.ok) { const b = Buffer.from(await r.arrayBuffer()); if (b.length > 0) return b } } catch (e: any) { lastErr = e } }
+    const sysDisp = systemDispatcherFor()
+    if (sysDisp) { try { const r = await proxyFetch(url, { redirect: 'error', dispatcher: sysDisp }); if (r.ok) { const b = Buffer.from(await r.arrayBuffer()); if (b.length > 0) return b } } catch (e: any) { lastErr = e } }
+    try { const r = await fetch(url, { redirect: 'error' }); if (r.ok) { const b = Buffer.from(await r.arrayBuffer()); if (b.length > 0) return b } } catch (e: any) { lastErr = e }
+    if (lastErr) console.warn(`[dsh-veryIM] ${ch.name} 下载文件失败: ${lastErr.cause?.message || lastErr.message}`)
+    return null
   } catch { return null }
 }
 
@@ -258,6 +278,12 @@ async function handleMediaMsg(ch: any, msg: any) {
   } else if (msg.audio) {
     fileId = msg.audio.file_id
     fileName = msg.audio.file_name || (msg.audio.title ? `${msg.audio.title}.mp3` : `audio_${msgId}.mp3`)
+  } else if (msg.sticker) {
+    fileId = msg.sticker.file_id
+    fileName = `sticker_${msgId}.${msg.sticker.is_animated ? 'tgs' : 'webp'}`
+  } else if (msg.animation) {
+    fileId = msg.animation.file_id
+    fileName = msg.animation.file_name || `animation_${msgId}.mp4`
   }
   if (!fileId) { await send('⚠️ 无法识别的文件类型'); return }
 
@@ -295,8 +321,12 @@ async function handleMediaMsg(ch: any, msg: any) {
   }
 
   // 注入会话：告诉 agent 有文件，用 [f:xxx] 标记让 looklook_see 能识别
+  // 带上 caption（用户发的文字提问），否则 agent 只看到文件名不知道用户想问什么
   const fileTag = `[f:${unique}]`
-  const promptText = `用户上传了文件「${fileName}」${fileTag}。请查看文件内容。`
+  const caption = (msg.caption || '').trim()
+  const promptText = caption
+    ? `用户上传了文件「${fileName}」${fileTag}，并附言：${caption}。请结合用户的问题查看文件内容。`
+    : `用户上传了文件「${fileName}」${fileTag}。请查看文件内容。`
   const promptResp = await dsh('session.prompt', { sessionId: sid, mode: 'queue', content: [{ type: 'text', text: promptText }] })
   if (!promptResp?.result?.ok) {
     await send('❌ 消息发送失败，请稍后重试')
@@ -360,12 +390,12 @@ async function handleMediaMsg(ch: any, msg: any) {
       thinkingMsgId = null
     }
 
-    // 媒体下行
+    // 媒体下行（失败不标记已发，下轮重试）
     const media = collectMedia(events, 0)
     for (const att of media) {
       if (shownMedia.has(att.attachmentId)) continue
-      shownMedia.add(att.attachmentId)
-      await sendPhoto(ch, chatId, att, att.name ? `📎 ${att.name}` : undefined)
+      const ok = await sendPhoto(ch, chatId, att, att.name ? `📎 ${att.name}` : undefined)
+      if (ok?.ok) shownMedia.add(att.attachmentId)
     }
 
     let items: any[] = []
@@ -579,13 +609,13 @@ async function handleMsg(ch: any, msg: any) {
     // ★ 回复出现后立即删除思考气泡（第一条回复发出即删）
     if (shownAnswerIds.size > 0 && thinkingMsgId) { await del(thinkingMsgId); thinkingMsgId = null }
 
-    // 4) 媒体下行：回合内出现的图片附件 → sendPhoto 发给用户（按 attachmentId 去重）
+    // 4) 媒体下行：回合内出现的图片附件 → sendPhoto 发给用户（失败不标记已发，下轮重试）
     const media = collectMedia(events, minTurn)
     for (const att of media) {
       if (shownMedia.has(att.attachmentId)) continue
-      shownMedia.add(att.attachmentId)
       // caption 用附件名（如果有），否则空
-      await sendPhoto(att, att.name ? `📎 ${att.name}` : undefined)
+      const ok = await sendPhoto(att, att.name ? `📎 ${att.name}` : undefined)
+      if (ok?.ok) shownMedia.add(att.attachmentId)
     }
 
     let items: any[] = []
@@ -611,7 +641,10 @@ async function handleMsg(ch: any, msg: any) {
   try { sitems = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch { /* ignore */ }
   if (chatGens.get(key) === myGen && sitems.find((s: any) => s.sessionId === sid)?.running) {
     const brief = shownThinking ? summarizeThinking(shownThinking) : ''
-    await edit(thinkingMsgId || 0, cap((brief ? '🤔 ' + brief : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
+    // 有 thinking 气泡才更新；没有则跳过（避免 message_id=0 无效请求）
+    if (thinkingMsgId) {
+      await edit(thinkingMsgId, cap((brief ? '🤔 ' + brief : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
+    }
   }
 }
 

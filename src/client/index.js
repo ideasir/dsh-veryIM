@@ -68,14 +68,13 @@ let _modal = null // 'pick' | 'cfg' | 'check'
 let _modalStack = [] // 弹窗历史栈，支持 ESC 退回上一层
 let _edit = null
 let _token = '', _proxy = '', _ws = '', _wl = '', _hasToken = false, _fb = null, _check = null, _saving = false
-let _showWs = true          // 插件级：WebUI 显示渠道工作区
 let _showChWs = true        // 渠道级：本渠道在 WebUI 显示工作区
 let _render = null // 卡片刷新回调
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
 
 async function refreshChannels() {
-  try { const r = await api('/status'); if (r && r.ok) { _channels = r.channels || []; if (r.settings) _showWs = r.settings.showWorkspaceInWebui !== false } } catch (e) {}
+  try { const r = await api('/status'); if (r && r.ok) { _channels = r.channels || [] } } catch (e) {}
 }
 
 function openModal(kind, ch) {

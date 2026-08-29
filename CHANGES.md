@@ -676,3 +676,24 @@ webui-settings 路由：
 - 构建产物只有 0829-0.2.1
 - src/ 无 0828 残留
 - DSH 重启正常，插件加载正常
+
+## 2026-08-29 — 复审修复（安全加固 + 7 个 bug）
+
+### 安全加固（不改代码）
+1. **启用白名单**：config.json 的 allowlist 设为 [8734867823]（主任 Telegram id）——之前为空，任何能私聊 bot 的人都可拿完整 agent 会话
+2. **chmod 600** 数据文件：config.json / sessions.json（botToken 明文不再同机任意用户可读）
+
+### 功能 bug
+3. **客户端空语句/死变量**：删掉 `_showWs`（读了插件级设置但从未消费），refreshChannels 只拉渠道列表
+4. **媒体上行丢 caption**：用户发「图片+文字」时 promptText 现在带上附言，agent 能看到提问
+5. **sticker/animation(GIF) 静默丢弃**：hasMedia 判断 + 媒体提取补 sticker/animation 分支
+6. **tgDownloadFile 代理降级不全**：补成三层降级（per-channel → 系统 → 直连），代理抖动不丢文件
+7. **媒体下行失败不重试**：shownMedia.add() 移到 sendPhoto 成功后（之前失败也记已发，图永久丢失）
+8. **dsh() 硬编码 3080**：改为 DSH_BASE（VERYIM_DSH_PORT 环境变量可覆盖），图片读取路由同步用 DSH_BASE
+9. **persistOffset 全量写盘节流**：内存立即更新 + 5 秒防抖落盘，高频消息不每条约写 config.json
+10. **edit 无效请求**：thinkingMsgId 为空时跳过，不再发 message_id=0 的无效请求
+
+### 验证
+- 服务端 + 客户端编译通过
+- DSH 重启正常，渠道健康
+- 各修复在产物中确认

@@ -1,5 +1,5 @@
 /** dsh-veryIM 客户端 — 纯 JS，弹窗用 innerHTML，卡片用 React */
-const VERSION = '0828-0.2.0'
+const VERSION = '0829-0.2.1'
 const REPO = 'https://github.com/ideasir/dsh-veryIM'
 
 const CSS = `

@@ -7,8 +7,7 @@
 
 ```text
 src/index.ts               # Host 半部：Telegram API、渠道管理、会话路由、Web 路由
-src/client/index.js         # Client 半部：插件卡片、渠道管理弹窗、智能检测 UI
-src/client/index.tsx        # 旧版 Client（未使用，保留参考）
+src/client/index.js         # Client 半部：插件卡片、渠道管理弹窗、智能检测 UI（唯一客户端源码）
 lib/index.js                # Host 构建产物
 lib/client.js               # 浏览器 bundle 构建产物
 cordis.patch.yml            # DSH bundle 注册 patch
@@ -16,6 +15,8 @@ package.json                # npm 与 DSH bundle 元数据
 tsdown.config.ts            # 客户端 bundle 配置
 CHANGES.md                  # 详细变更记录
 ```
+
+> ⚠️ **客户端唯一源码是 `src/client/index.js`（纯 JS）**。之前的 `index.tsx`、`index.tsx.bak-*`、`src.bak-*` 都是死代码，已清理（2026-08-29）。改客户端代码必须改 index.js，改 index.tsx 构建产物不会变化。
 
 运行时使用 `lib/index.js` 和 `lib/client.js`。`src/` 是唯一源码，修改源码后必须重新构建。
 

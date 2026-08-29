@@ -658,3 +658,21 @@ webui-settings 路由：
 - 新会话权限序列：preset=danger-full-access + sandbox=danger-full-access + approval=ask ✅
 - 两个钩子注册成功（日志确认）
 - 链路：沙箱放开 + 审批 ask → veryIM 自动应答 allowed-once → 全自动放行
+
+## 2026-08-29 — 死代码清理 + 版本号统一
+
+### 死代码清理
+- 删除 `src/client/index.tsx`（git rm，旧版 TS 客户端，从未使用）
+- 删除 `src/client/index.tsx.bak-1833`、`src/client/index.tsx.old-204912`（本地遗留备份）
+- 删除 `src.bak-192209/`（整目录旧备份）
+- 客户端现在唯一源码 = `src/client/index.js`（纯 JS，tsdown 入口）
+- DEVELOPMENT.md 已更新：标注唯一源码、记录清理说明
+
+### 版本号统一
+- 之前：package.json=0829-0.2.1、index.js=0828-0.2.0、index.tsx=0828-0.1.1、README=0829-0.2.1（三处不一致）
+- 现在全部统一为 `0829-0.2.1`，无 0828 残留
+
+### 验证
+- 构建产物只有 0829-0.2.1
+- src/ 无 0828 残留
+- DSH 重启正常，插件加载正常

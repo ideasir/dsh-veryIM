@@ -580,3 +580,16 @@ webui-settings 路由：
 - status 返回 `86484...UeQ`（脱敏）
 - 同源 Origin 回显；跨源 evil.com 无 CORS 头
 - check 路由正常、渠道健康
+
+## 2026-08-29 — P1 命令菜单（setMyCommands）
+
+### 为什么
+审查发现 bot 连上后没注册命令菜单，用户看不到 /help /new /cancel。
+
+### 改了什么
+- startPoll 启动长轮询前调用 setMyCommands 注册菜单（/menu 查看命令 /new 新对话 /cancel 取消）
+- fire-and-forget：注册失败不影响轮询
+
+### 验证
+- Telegram getMyCommands 返回 ['menu', 'new', 'cancel'] ✅
+- 渠道正常启动，无错误日志

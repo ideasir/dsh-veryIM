@@ -111,6 +111,15 @@ function startPoll(ch: any) {
   if (polls.has(ch.id)) return
   const ctrl = new AbortController()
   polls.set(ch.id, ctrl)
+  // 注册 Telegram 命令菜单（/menu /new /cancel），失败不影响轮询
+  tg(ch, '/setMyCommands', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commands: [
+      { command: 'menu', description: '查看可用命令' },
+      { command: 'new', description: '新开一个对话' },
+      { command: 'cancel', description: '取消当前回复' },
+    ] }),
+  }).catch(() => {})
   pollLoop(ch, ctrl.signal).catch(e => console.error(`[dsh-veryIM] poll ${ch.name} fatal:`, e.message))
 }
 function stopPoll(id: string) { const c = polls.get(id); if (c) { c.abort(); polls.delete(id) } }

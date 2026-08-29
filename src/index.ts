@@ -99,9 +99,22 @@ const polls = new Map<string, AbortController>()
 // 同一 chat 并发消息时，会话创建去重，避免双开会话
 const sessionLocks = new Map<string, Promise<string>>()
 // 每个 chat 的"代次"：新消息到达 +1，让旧回复轮询立即停止（防重复/支持打断）
-const chatGens = new Map<string, number>()
+// 值含时间戳 t：轮询结束后按代次清理；不按时间清（长任务轮询可持续 30 分钟+，清早了会误杀活跃轮询）
+const chatGens = new Map<string, { gen: number; t: number }>()
 // 消息去重：避免同一 update 被重放导致重复处理
 const recentMsgs = new Map<string, { id: number; t: number }>()
+
+// ── Map 定期清扫：防长期运行内存缓慢增长 ──
+// recentMsgs 只用于 60s 去重窗，超窗条目即可丢；chatGens 由轮询结束后自行清理
+function sweepMaps() {
+  const now = Date.now()
+  for (const [k, v] of recentMsgs) {
+    if (now - v.t > 70000) recentMsgs.delete(k) // 60s 去重窗 + 余量
+  }
+  // chatGens 不在此清理：活跃轮询可能很长，等轮询结束按代次 delete
+}
+const sweepTimer = setInterval(sweepMaps, 5 * 60 * 1000)
+sweepTimer.unref?.()
 
 const HELP_TEXT = [
   '🤖 VeryIM 命令',
@@ -338,8 +351,8 @@ async function handleMediaMsg(ch: any, msg: any) {
   const sentId = sent?.ok ? sent.result?.message_id : null
 
   // ── 轮询回复（复用了 handleMsg 的轮询逻辑，简化版）──
-  const myGen = (chatGens.get(key) || 0) + 1
-  chatGens.set(key, myGen)
+  const myGen = (chatGens.get(key)?.gen || 0) + 1
+  chatGens.set(key, { gen: myGen, t: Date.now() })
 
   let thinkingMsgId: number | null = sentId
   let shownThinking = ''
@@ -347,8 +360,8 @@ async function handleMediaMsg(ch: any, msg: any) {
   const shownAnswerIds = new Set<string>()
   const shownMedia = new Set<string>()
 
-  for (let i = 0; i < 600; i++) {
-    if (chatGens.get(key) !== myGen) break
+  for (let i = 0; i < 2400; i++) {
+    if (chatGens.get(key)?.gen !== myGen) break
     await sleep(1500)
     if (i % 2 === 0) await tg(ch, '/sendChatAction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, action: 'typing' }) }).catch(() => {})
     let events: any[] = []
@@ -394,7 +407,7 @@ async function handleMediaMsg(ch: any, msg: any) {
     const media = collectMedia(events, 0)
     for (const att of media) {
       if (shownMedia.has(att.attachmentId)) continue
-      const ok = await sendPhoto(ch, chatId, att, att.name ? `📎 ${att.name}` : undefined)
+      const ok = await sendPhotoModule(ch, chatId, att, att.name ? `📎 ${att.name}` : undefined)
       if (ok?.ok) shownMedia.add(att.attachmentId)
     }
 
@@ -402,6 +415,8 @@ async function handleMediaMsg(ch: any, msg: any) {
     try { items = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch {}
     if (!items.find((s: any) => s.sessionId === sid)?.running) break
   }
+  // 轮询结束：若仍是当前代次（无新消息插入），删除该 chat 的代次键，防内存增长
+  if (chatGens.get(key)?.gen === myGen) chatGens.delete(key)
 }
 
 async function handleMsg(ch: any, msg: any) {
@@ -416,8 +431,8 @@ async function handleMsg(ch: any, msg: any) {
   recentMsgs.set(key, { id: msgId, t: Date.now() })
 
   // 代次令牌：本消息使任何更早的同 chat 回复轮询立即失效
-  const myGen = (chatGens.get(key) || 0) + 1
-  chatGens.set(key, myGen)
+  const myGen = (chatGens.get(key)?.gen || 0) + 1
+  chatGens.set(key, { gen: myGen, t: Date.now() })
 
   const send = async (t: string, reply = false) => {
     const md = mdToTelegram(t)
@@ -549,8 +564,8 @@ async function handleMsg(ch: any, msg: any) {
   // 已发送的图片附件（按 attachmentId 去重，避免重复发图）
   const shownMedia = new Set<string>()
 
-  for (let i = 0; i < 600; i++) {
-    if (chatGens.get(key) !== myGen) break   // 已被更新的消息取代 → 立即停止
+  for (let i = 0; i < 2400; i++) {
+    if (chatGens.get(key)?.gen !== myGen) break   // 已被更新的消息取代 → 立即停止
     await sleep(1500)
     if (i % 2 === 0) await typing().catch(() => {})
     let events: any[] = []
@@ -639,23 +654,37 @@ async function handleMsg(ch: any, msg: any) {
   // 超时仍在处理 → 更新思考气泡上的提示
   let sitems: any[] = []
   try { sitems = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch { /* ignore */ }
-  if (chatGens.get(key) === myGen && sitems.find((s: any) => s.sessionId === sid)?.running) {
+  if (chatGens.get(key)?.gen === myGen && sitems.find((s: any) => s.sessionId === sid)?.running) {
     const brief = shownThinking ? summarizeThinking(shownThinking) : ''
     // 有 thinking 气泡才更新；没有则跳过（避免 message_id=0 无效请求）
     if (thinkingMsgId) {
       await edit(thinkingMsgId, cap((brief ? '🤔 ' + brief : '⏳ 处理中…') + '\n\n（仍在处理中，发送 /cancel 可打断）', MAX_MSG)).catch(() => {})
     }
   }
+  // 轮询结束：若仍是当前代次（无新消息插入），删除该 chat 的代次键，防内存增长
+  if (chatGens.get(key)?.gen === myGen) chatGens.delete(key)
 }
 
 // 创建会话：同 chat 并发去重；渠道会话用渠道配置的 workspace 目录（电报对话 → 电报工作区）
 function createSessionLocked(key: string, ch: any): Promise<string> {
   const existing = sessionLocks.get(key)
   if (existing) return existing
-  // 用渠道配置的 workspace 路径（若无则用 DSH 主工作区）
-  const cwd = ch?.workspace && ch.workspace.trim() ? ch.workspace.trim() : '/root/DSH'
-  const payload = { cwd }
-  const p = dsh('session.create', payload).then(r => r?.result?.value?.sessionId as string).finally(() => sessionLocks.delete(key))
+  // 渠道配置了 workspace 路径时，解析其 workspaceId 并随创建请求传入：
+  // 这样 DSH 在创建时就会把会话 attach 进对应工作区（否则新会话落入"未分组"）。
+  // 用与 handleMsg 一致的解析逻辑（workspace.list → 按 path 匹配）。
+  const p = (async () => {
+    const cwd = ch?.workspace && ch.workspace.trim() ? ch.workspace.trim() : '/root/DSH'
+    let payload: any = { cwd }
+    // 尝试解析渠道工作区 id；失败/不存在则退回纯 cwd（DSH 默认放 DSH 工作区）
+    try {
+      const wsList = await dsh('workspace.list', {})
+      const wsItems: any[] = wsList?.result?.value?.items ?? []
+      const targetWs = wsItems.find((w: any) => w.path === cwd)
+      if (targetWs?.workspaceId) payload = { workspaceId: targetWs.workspaceId, cwd }
+    } catch { /* 忽略，退回 cwd 路径创建 */ }
+    const r = await dsh('session.create', payload)
+    return r?.result?.value?.sessionId as string
+  })().finally(() => sessionLocks.delete(key))
   sessionLocks.set(key, p)
   return p
 }

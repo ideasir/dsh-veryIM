@@ -697,3 +697,18 @@ webui-settings 路由：
 - 服务端 + 客户端编译通过
 - DSH 重启正常，渠道健康
 - 各修复在产物中确认
+
+## 2026-08-29 — 主任复审修复（Map 清扫 + 轮询延长 + 工作区 attach + 调用修正）
+
+### 主任改动（src/index.ts）
+1. **chatGens 加时间戳**：值从 number 改为 {gen, t}，轮询结束后按代次清理（防 Map 只增不减）
+2. **recentMsgs 定期清扫**：新增 sweepMaps()，5 分钟一次，70 秒超窗条目清理（防内存增长）
+3. **轮询上限 600→2400**：15 分钟→60 分钟，长任务不截断气泡流（处理审查 #9）
+4. **handleMediaMsg 调 sendPhotoModule**：直接调模块级函数（修正闭包混乱）
+5. **createSessionLocked 解析 workspaceId**：会话创建时先 workspace.list 解析渠道工作区 id 随请求传入，DSH 创建即 attach 进渠道工作区（避免"未分组"）
+
+### 验证
+- 服务端 + 客户端编译通过
+- 无死代码、无 TODO/FIXME、版本号 0829-0.2.1 一致
+- DSH 重启正常、渠道健康
+- 产物确认 sweepMaps/2400/workspaceId 已部署

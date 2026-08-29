@@ -67,7 +67,7 @@ let _channels = []
 let _modal = null // 'pick' | 'cfg' | 'check'
 let _modalStack = [] // 弹窗历史栈，支持 ESC 退回上一层
 let _edit = null
-let _token = '', _proxy = '', _ws = '', _fb = null, _check = null, _saving = false
+let _token = '', _proxy = '', _ws = '', _wl = '', _fb = null, _check = null, _saving = false
 let _showWs = true          // 插件级：WebUI 显示渠道工作区
 let _showChWs = true        // 渠道级：本渠道在 WebUI 显示工作区
 let _render = null // 卡片刷新回调
@@ -81,7 +81,7 @@ async function refreshChannels() {
 function openModal(kind, ch) {
   // 把当前弹窗状态压栈（支持 goBack 回退）
   if (_modal) {
-    _modalStack.push({ modal: _modal, edit: _edit, token: _token, proxy: _proxy, ws: _ws, fb: _fb, check: _check })
+    _modalStack.push({ modal: _modal, edit: _edit, token: _token, proxy: _proxy, ws: _ws, wl: _wl, fb: _fb, check: _check })
   }
   _modal = kind
   if (kind === 'cfg') {
@@ -89,6 +89,7 @@ function openModal(kind, ch) {
     _token = ch ? (ch.botToken || '') : ''
     _proxy = ch ? (ch.proxy || '') : ''
     _ws = ch ? (ch.workspace || '') : ''
+    _wl = ch ? (Array.isArray(ch.allowlist) ? ch.allowlist.join(', ') : '') : ''
     _showChWs = ch ? (ch.showInWebui !== false) : true
     _fb = null
   }
@@ -102,7 +103,7 @@ function goBack() {
   if (_modalStack.length === 0) { closeModal(); return }
   const prev = _modalStack.pop()
   _modal = prev.modal; _edit = prev.edit; _token = prev.token
-  _proxy = prev.proxy; _ws = prev.ws; _fb = prev.fb; _check = prev.check
+  _proxy = prev.proxy; _ws = prev.ws; _wl = prev.wl || ''; _fb = prev.fb; _check = prev.check
   renderModal()
 }
 
@@ -156,6 +157,11 @@ function modalHtml() {
             <label>工作区路径</label>
             <input data-vm-ws type="text" placeholder="/vol1/1000/DeepSeek/telegram" value="${esc(_ws)}" />
             <small>可选。留空使用 DSH 默认工作区</small>
+          </div>
+          <div class="dsh-vm-mf">
+            <label>用户白名单</label>
+            <input data-vm-wl type="text" placeholder="例如：8734867823, 12345678（数字 user id，逗号分隔）" value="${esc(_wl)}" />
+            <small>可选。留空=不限（任何人可用）；填写后仅名单内用户能对话</small>
           </div>
           <div class="dsh-vm-mf">
             <label>在 WebUI 显示工作区</label>
@@ -247,6 +253,7 @@ function bindModal(root) {
   const t = root.querySelector('[data-vm-token]'); if (t) t.addEventListener('input', e => _token = e.target.value)
   const p = root.querySelector('[data-vm-proxy]'); if (p) p.addEventListener('input', e => _proxy = e.target.value)
   const w = root.querySelector('[data-vm-ws]'); if (w) w.addEventListener('input', e => _ws = e.target.value)
+  const wl = root.querySelector('[data-vm-wl]'); if (wl) wl.addEventListener('input', e => _wl = e.target.value)
 }
 
 // ESC 键：输入框内先 blur，否则退回上一层弹窗
@@ -275,7 +282,8 @@ async function doTest() {
 async function doSave() {
   _saving = true; renderModal()
   try {
-    const r = await api('/save', { botToken: _token, proxy: _proxy || undefined, workspace: _ws || undefined, showInWebui: _showChWs, ...(_edit && _edit.id ? { id: _edit.id } : {}) })
+    const wlArr = _wl.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean).map(Number).filter(n => Number.isFinite(n))
+    const r = await api('/save', { botToken: _token, proxy: _proxy || undefined, workspace: _ws || undefined, showInWebui: _showChWs, allowlist: wlArr, ...(_edit && _edit.id ? { id: _edit.id } : {}) })
     if (r && r.ok) {
       _fb = { t: 'ok', m: '✅ 已保存并连接' }
       await refreshChannels()

@@ -130,6 +130,10 @@ async function pollLoop(ch: any, signal: AbortSignal) {
         if (offset > (Number(ch.lastUpdateId) || 0)) { ch.lastUpdateId = offset; persistOffset(ch) }
         const msg = upd.message
         if (!msg?.text || msg.from?.is_bot) continue
+        // 白名单：allowlist 非空时只处理名单内用户（user id），其他静默忽略
+        // 注意：from.id 缺失也拒绝（防恶意构造无 from 的消息绕过白名单）
+        const wl = Array.isArray(ch.allowlist) ? ch.allowlist : []
+        if (wl.length > 0 && (!msg.from?.id || !wl.includes(msg.from.id))) continue
         handleMsg(ch, msg).catch(e => log(`handleMsg err: ${e.message}`))
       }
     } catch (e: any) {
@@ -815,7 +819,7 @@ export function apply(ctx: any) {
   ctx.webServer.register({ kind: 'exact', path: '/plugins/dsh-veryIM/save',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
-        const { id, botToken, name, workspace, proxy, showInWebui } = await body(req)
+        const { id, botToken, name, workspace, proxy, showInWebui, allowlist } = await body(req)
         const cfg = loadCfg()
         const ex = cfg.channels.find((c: any) => c.id === id)
         const finalToken = botToken || ex?.botToken
@@ -834,6 +838,7 @@ export function apply(ctx: any) {
           workspace: workspace !== undefined ? workspace : ex?.workspace,
           proxy: proxy !== undefined ? proxy : ex?.proxy,
           showInWebui: showInWebui !== undefined ? !!showInWebui : (ex?.showInWebui !== undefined ? ex.showInWebui : false),
+          allowlist: allowlist !== undefined ? allowlist : (ex?.allowlist || []),
         }
         if (tokenChanged) {
           const disp = proxy ? (() => { try { return new ProxyAgent(proxy) } catch (e: any) { console.warn('[dsh-veryIM] save 代理不可用: ' + e.message); return undefined } })() : undefined

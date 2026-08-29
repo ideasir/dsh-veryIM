@@ -640,3 +640,21 @@ webui-settings 路由：
 ### 验证
 - 编译通过、渠道正常
 - 文件路径与 looklook_see 的 .uploads/ 解析一致（exec.agent.session.header.cwd）
+
+## 2026-08-29 — 全自动放行（审批自动允许 + 沙箱全放开）
+
+### 背景
+主任要求"全自动放行"。DSH 的 danger-full-access 预设 = 沙箱全放开 + approval never（never=直接拒绝，不是放行）。所以要：沙箱保持 full access + 审批改 ask + 自动应答者放行。
+
+### 改了什么（src/index.ts）
+1. 审批自动应答者：ctx.on('approval/request', → allowed-once, prepend=true)
+   - prepend 抢在 DSH WebUI 应答者之前，所有审批自动允许不弹窗
+2. 会话创建钩子：ctx.on('session/created', setApprovalPolicy(session,'ask'))
+   - 覆盖预设的 never 为 ask（never 会跳过应答者直接拒绝）
+   - 沙箱保持 danger-full-access（文件全放开）
+3. 新增依赖 @deepseek-ai/dsh-user-approval（软链 DSH 全局，同源）
+
+### 验证
+- 新会话权限序列：preset=danger-full-access + sandbox=danger-full-access + approval=ask ✅
+- 两个钩子注册成功（日志确认）
+- 链路：沙箱放开 + 审批 ask → veryIM 自动应答 allowed-once → 全自动放行

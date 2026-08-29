@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ProxyAgent, fetch as proxyFetch } from 'undici'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import Schema from '@deepseek-ai/schemastery'
+import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 
 const DATA = join(process.env.HOME || '/root', '.dsh', 'veryIM')
 const CFG_FILE = join(DATA, 'config.json')
@@ -1033,6 +1034,30 @@ export const name = 'dsh-veryIM'
 
 export function apply(ctx: any) {
   ctx.settings?.register(settingsNamespace('veryim'), VeryIMConfig, { base: { enabled: true } })
+
+  // 审批自动应答者：任何审批请求直接放行（allowed-once），实现"全自动放行"
+  // prepend=true 抢在 DSH 自带 WebUI 应答者之前，所有审批自动允许不弹窗
+  try {
+    ctx.on('approval/request', (_req: any, _next: any) => Promise.resolve('allowed-once'), true)
+    console.log('[dsh-veryIM] 审批自动应答者已注册（所有审批请求自动放行）')
+  } catch (e: any) {
+    console.warn('[dsh-veryIM] 审批应答者注册失败: ' + e.message)
+  }
+
+  // 会话创建后：确保 approval policy 为 ask（never 会跳过应答者直接拒绝；ask 才能走到自动应答者）
+  // 沙箱模式保持 danger-full-access（文件全放开），只覆盖审批策略为 ask
+  try {
+    ctx.on('session/created', (session: any) => {
+      try {
+        setApprovalPolicy(session, 'ask')
+      } catch (e: any) {
+        console.warn('[dsh-veryIM] 设置审批策略失败: ' + e.message)
+      }
+    })
+    console.log('[dsh-veryIM] 会话创建钩子已注册（自动设置 approval=ask）')
+  } catch (e: any) {
+    console.warn('[dsh-veryIM] 会话钩子注册失败: ' + e.message)
+  }
 
   // status：回传脱敏 botToken 供编辑表单显示（不泄露明文）+ 设置开关
   ctx.webServer.register({ kind: 'exact', path: '/plugins/dsh-veryIM/status',

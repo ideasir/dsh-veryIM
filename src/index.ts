@@ -1,6 +1,6 @@
 /** dsh-veryIM 服务端 v5 — 系统代理 + 渠道级工作区 + 智能检测 */
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { join, basename } from 'path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ProxyAgent, fetch as proxyFetch } from 'undici'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -138,11 +138,15 @@ async function pollLoop(ch: any, signal: AbortSignal) {
         offset = Number(upd.update_id) + 1
         if (offset > (Number(ch.lastUpdateId) || 0)) { ch.lastUpdateId = offset; persistOffset(ch) }
         const msg = upd.message
-        if (!msg?.text || msg.from?.is_bot) continue
+        if (msg?.from?.is_bot) continue
         // 白名单：allowlist 非空时只处理名单内用户（user id），其他静默忽略
         // 注意：from.id 缺失也拒绝（防恶意构造无 from 的消息绕过白名单）
         const wl = Array.isArray(ch.allowlist) ? ch.allowlist : []
         if (wl.length > 0 && (!msg.from?.id || !wl.includes(msg.from.id))) continue
+        // 媒体消息（图/文件/语音/视频）→ 上行处理；无媒体的纯文本 → 正常对话
+        const hasMedia = !!(msg.photo || msg.document || msg.voice || msg.video || msg.audio)
+        if (hasMedia) { handleMediaMsg(ch, msg).catch(e => log(`handleMediaMsg err: ${e.message}`)); continue }
+        if (!msg?.text) continue
         handleMsg(ch, msg).catch(e => log(`handleMsg err: ${e.message}`))
       }
     } catch (e: any) {
@@ -157,6 +161,216 @@ function persistOffset(ch: any) {
   const cfg = loadCfg()
   const ex = cfg.channels.find((c: any) => c.id === ch.id)
   if (ex) { ex.lastUpdateId = ch.lastUpdateId; saveCfg(cfg) }
+}
+
+// 模块级：发送图片（媒体下行），供 handleMsg / handleMediaMsg 共用
+async function sendPhotoModule(
+  ch: any, chatId: number,
+  att: { attachmentId: string; mediaType: string; name?: string },
+  caption?: string,
+): Promise<any | null> {
+  try {
+    const imgRes = await fetch(`http://127.0.0.1:3080/plugins/dsh-makemake/image?attachmentId=${encodeURIComponent(att.attachmentId)}`, { redirect: 'error' })
+    if (!imgRes.ok) { console.warn(`[dsh-veryIM] ${ch.name} 读取附件失败: HTTP ${imgRes.status}`); return null }
+    const buf = Buffer.from(await imgRes.arrayBuffer())
+    if (buf.length === 0) return null
+    const form = new FormData()
+    const ext = (att.mediaType || 'image/jpeg').split('/')[1]?.replace('jpeg', 'jpg') || 'jpg'
+    form.append('chat_id', String(chatId))
+    form.append('photo', new Blob([new Uint8Array(buf)], { type: att.mediaType || 'image/jpeg' }), `${att.name || 'image'}.${ext}`)
+    if (caption) form.append('caption', mdToTelegram(caption))
+    const url = `https://api.telegram.org/bot${ch.botToken}/sendPhoto`
+    // 走代理容错：per-channel → 系统 → 直连
+    let lastErr: any = null
+    const disp = dispatcherFor(ch)
+    if (disp) { try { return await (await proxyFetch(url, { method: 'POST', body: form, dispatcher: disp })).json() } catch (e: any) { lastErr = e } }
+    const sysDisp = systemDispatcherFor()
+    if (sysDisp) { try { return await (await proxyFetch(url, { method: 'POST', body: form, dispatcher: sysDisp })).json() } catch (e: any) { lastErr = e } }
+    try { return await (await fetch(url, { method: 'POST', body: form })).json() } catch (e: any) { lastErr = e }
+    if (lastErr) console.warn(`[dsh-veryIM] ${ch.name} sendPhoto 网络失败: ${lastErr.cause?.message || lastErr.message}`)
+    return null
+  } catch (e: any) {
+    console.warn(`[dsh-veryIM] ${ch.name} sendPhoto 失败: ${e.message}`)
+    return null
+  }
+}
+
+// 从 Telegram 下载文件（getFile → 获取 file_path → 下载字节）
+async function tgDownloadFile(ch: any, fileId: string): Promise<Buffer | null> {
+  try {
+    const resp = await tg(ch, `/getFile?file_id=${encodeURIComponent(fileId)}`)
+    if (!resp?.ok || !resp.result?.file_path) return null
+    const url = `https://api.telegram.org/file/bot${ch.botToken}/${resp.result.file_path}`
+    const bufRes = await fetch(url, { redirect: 'error', dispatcher: dispatcherFor(ch) }).catch(() => null)
+    if (!bufRes || !bufRes.ok) return null
+    const buf = Buffer.from(await bufRes.arrayBuffer())
+    return buf.length > 0 ? buf : null
+  } catch { return null }
+}
+
+// 媒体上行：用户发图/文件/语音 → 下载 → 存到会话 .uploads/ → 注入 session.prompt
+async function handleMediaMsg(ch: any, msg: any) {
+  const chatId = msg.chat.id
+  const key = `${ch.id}:${chatId}`
+  const msgId = msg.message_id
+  // 去重（同媒体消息 60s 内不重复处理）
+  const prev = recentMsgs.get(key)
+  if (prev && prev.id === msgId && Date.now() - prev.t < 60000) return
+  recentMsgs.set(key, { id: msgId, t: Date.now() })
+
+  const send = async (t: string) => {
+    const md = mdToTelegram(t)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        let resp = await tg(ch, '/sendMessage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: md, parse_mode: 'MarkdownV2', reply_to_message_id: msgId, allow_sending_without_reply: true }),
+        })
+        if (!resp?.ok && /parse|entity|UTF|invalid/i.test(resp?.description || '')) {
+          resp = await tg(ch, '/sendMessage', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: t, reply_to_message_id: msgId, allow_sending_without_reply: true }),
+          })
+        }
+        if (resp?.ok) return resp
+      } catch { if (attempt < 1) await sleep(2000) }
+    }
+    return null
+  }
+
+  // 提取媒体信息：优先 photo（取最大尺寸），其次 document/voice/video/audio
+  let fileId = ''
+  let fileName = ''
+  if (msg.photo) {
+    const photo = msg.photo[msg.photo.length - 1]  // 最大尺寸
+    fileId = photo.file_id
+    fileName = `photo_${msgId}.jpg`
+  } else if (msg.document) {
+    fileId = msg.document.file_id
+    fileName = msg.document.file_name || `doc_${msgId}`
+  } else if (msg.voice) {
+    fileId = msg.voice.file_id
+    fileName = `voice_${msgId}.ogg`
+  } else if (msg.video) {
+    fileId = msg.video.file_id
+    fileName = msg.video.file_name || `video_${msgId}.mp4`
+  } else if (msg.audio) {
+    fileId = msg.audio.file_id
+    fileName = msg.audio.file_name || (msg.audio.title ? `${msg.audio.title}.mp3` : `audio_${msgId}.mp3`)
+  }
+  if (!fileId) { await send('⚠️ 无法识别的文件类型'); return }
+
+  // 下载文件
+  const buf = await tgDownloadFile(ch, fileId)
+  if (!buf || buf.length === 0) { await send('⚠️ 无法下载文件，请稍后重试'); return }
+
+  // 获取会话 id，存文件到会话 .uploads/
+  let sid = getSes(key)
+  if (!sid) {
+    sid = await createSessionLocked(key, ch)
+    if (sid) updateSes(s => { s[key] = sid })
+  }
+  if (!sid) { await send('❌ 无法创建对话会话'); return }
+
+  // 安全文件名（basename only + 时间戳后缀防重名）
+  const safeBase = basename(fileName).replace(/[/\\\0]/g, '_')
+  const dot = safeBase.lastIndexOf('.')
+  const ts = Date.now().toString()
+  const unique = dot >= 0 ? `${safeBase.slice(0, dot)}_${ts}${safeBase.slice(dot)}` : `${safeBase}_${ts}`
+
+  // 写入会话 .uploads/ 目录
+  try {
+    const ws = await dsh('workspace.list', {}).catch(() => null)
+    const wsItems: any[] = ws?.result?.value?.items ?? []
+    const targetWs = wsItems.find((w: any) => w.path === ch.workspace)
+    const cwd = targetWs?.path || '/root/DSH'
+    const uploadDir = join(cwd, '.uploads')
+    mkdirSync(uploadDir, { recursive: true })
+    writeFileSync(join(uploadDir, unique), buf)
+  } catch (e: any) {
+    console.warn(`[dsh-veryIM] ${ch.name} 存文件失败: ${e.message}`)
+    await send('⚠️ 文件保存失败，请稍后重试')
+    return
+  }
+
+  // 注入会话：告诉 agent 有文件，用 [f:xxx] 标记让 looklook_see 能识别
+  const fileTag = `[f:${unique}]`
+  const promptText = `用户上传了文件「${fileName}」${fileTag}。请查看文件内容。`
+  const promptResp = await dsh('session.prompt', { sessionId: sid, mode: 'queue', content: [{ type: 'text', text: promptText }] })
+  if (!promptResp?.result?.ok) {
+    await send('❌ 消息发送失败，请稍后重试')
+    return
+  }
+
+  // 发送确认消息，然后进入轮询等待回复
+  const sent = await send(`📎 已收到文件「${fileName}」，正在处理…`)
+  const sentId = sent?.ok ? sent.result?.message_id : null
+
+  // ── 轮询回复（复用了 handleMsg 的轮询逻辑，简化版）──
+  const myGen = (chatGens.get(key) || 0) + 1
+  chatGens.set(key, myGen)
+
+  let thinkingMsgId: number | null = sentId
+  let shownThinking = ''
+  const shownTools = new Set<string>()
+  const shownAnswerIds = new Set<string>()
+  const shownMedia = new Set<string>()
+
+  for (let i = 0; i < 600; i++) {
+    if (chatGens.get(key) !== myGen) break
+    await sleep(1500)
+    if (i % 2 === 0) await tg(ch, '/sendChatAction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, action: 'typing' }) }).catch(() => {})
+    let events: any[] = []
+    try {
+      const msgs = await dsh('session.history', { sessionId: sid })
+      events = (msgs?.result?.value?.events || [])
+    } catch { continue }
+
+    const thinking = collectThinking(events, 0)
+    if (thinking && thinking !== shownThinking) {
+      shownThinking = thinking
+      const brief = summarizeThinking(thinking)
+      const text = '🤔 ' + brief
+      if (thinkingMsgId) await tg(ch, '/editMessageText', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, message_id: thinkingMsgId, text: mdToTelegram(text), parse_mode: 'MarkdownV2' }) }).catch(() => {})
+      else { const s = await send(text); if (s?.ok) thinkingMsgId = s.result.message_id }
+    }
+
+    // 工具气泡
+    for (const ev of events) {
+      const e = ev?.event
+      if (!e || e.type !== 'tool/call') continue
+      const d = e.data || {}
+      const name = d.name || ''; const args = d.arguments || ''
+      const sig = `${name} ${args}`.trim()
+      if (!shownTools.has(sig)) { shownTools.add(sig); await send('⚙️ ' + toolLabel(name, args)) }
+    }
+
+    // 回复
+    const answers = collectAnswers(events, 0)
+    for (const a of answers) {
+      if (shownAnswerIds.has(a.key)) continue
+      const model = collectModel(events, 0)
+      const footer = model ? `\n\n────────\n🤖 ${model}` : ''
+      const s = await send(a.text + footer)
+      if (s?.ok) shownAnswerIds.add(a.key)
+    }
+    if (shownAnswerIds.size > 0 && thinkingMsgId) {
+      await tg(ch, '/deleteMessage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, message_id: thinkingMsgId }) }).catch(() => {})
+      thinkingMsgId = null
+    }
+
+    // 媒体下行
+    const media = collectMedia(events, 0)
+    for (const att of media) {
+      if (shownMedia.has(att.attachmentId)) continue
+      shownMedia.add(att.attachmentId)
+      await sendPhoto(ch, chatId, att, att.name ? `📎 ${att.name}` : undefined)
+    }
+
+    let items: any[] = []
+    try { items = await dsh('session.list', {}).then(r => r?.result?.value?.items || []) } catch {}
+    if (!items.find((s: any) => s.sessionId === sid)?.running) break
+  }
 }
 
 async function handleMsg(ch: any, msg: any) {
@@ -201,33 +415,8 @@ async function handleMsg(ch: any, msg: any) {
     return null
   }
   // 发送图片：通过 DSH 附件路由读取 attachment 字节 → sendPhoto（multipart/form-data）
-  const sendPhoto = async (att: { attachmentId: string; mediaType: string; name?: string }, caption?: string) => {
-    try {
-      // 同机调 DSH 的 attachment 桥路由（makemake 注册的 /plugins/dsh-makemake/image 支持读任意 attachment）
-      const imgRes = await fetch(`http://127.0.0.1:3080/plugins/dsh-makemake/image?attachmentId=${encodeURIComponent(att.attachmentId)}`, { redirect: 'error' })
-      if (!imgRes.ok) { console.warn(`[dsh-veryIM] ${ch.name} 读取附件失败: HTTP ${imgRes.status}`); return null }
-      const buf = Buffer.from(await imgRes.arrayBuffer())
-      if (buf.length === 0) return null
-      const form = new FormData()
-      const ext = (att.mediaType || 'image/jpeg').split('/')[1]?.replace('jpeg', 'jpg') || 'jpg'
-      form.append('chat_id', String(chatId))
-      form.append('photo', new Blob([new Uint8Array(buf)], { type: att.mediaType || 'image/jpeg' }), `${att.name || 'image'}.${ext}`)
-      if (caption) form.append('caption', mdToTelegram(caption))
-      const url = `https://api.telegram.org/bot${ch.botToken}/sendPhoto`
-      // 走代理容错：per-channel → 系统 → 直连
-      let lastErr: any = null
-      const disp = dispatcherFor(ch)
-      if (disp) { try { return await (await proxyFetch(url, { method: 'POST', body: form, dispatcher: disp })).json() } catch (e: any) { lastErr = e } }
-      const sysDisp = systemDispatcherFor()
-      if (sysDisp) { try { return await (await proxyFetch(url, { method: 'POST', body: form, dispatcher: sysDisp })).json() } catch (e: any) { lastErr = e } }
-      try { return await (await fetch(url, { method: 'POST', body: form })).json() } catch (e: any) { lastErr = e }
-      if (lastErr) console.warn(`[dsh-veryIM] ${ch.name} sendPhoto 网络失败: ${lastErr.cause?.message || lastErr.message}`)
-      return null
-    } catch (e: any) {
-      console.warn(`[dsh-veryIM] ${ch.name} sendPhoto 失败: ${e.message}`)
-      return null
-    }
-  }
+  const sendPhoto = (att: { attachmentId: string; mediaType: string; name?: string }, caption?: string) =>
+    sendPhotoModule(ch, chatId, att, caption)
   const edit = async (messageId: number, t: string) => {
     const md = mdToTelegram(t)
     let resp: any = await tg(ch, '/editMessageText', {

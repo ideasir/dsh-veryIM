@@ -613,3 +613,30 @@ webui-settings 路由：
 - 真实 attachment（sha256:... 1024×1024 JPEG 124KB）读取成功
 - sendPhoto 全链路测试成功，图片已发到 Telegram（msg_id=1503）
 - 编译通过、渠道正常
+
+## 2026-08-29 — P1 媒体上行（用户发图/文件 → agent 能看）
+
+### 为什么
+审查发现用户发图/文件/语音被直接丢弃（!msg.text 就 continue），agent 看不到用户上传的任何媒体。
+
+### 方案
+```
+用户 Telegram 发图/文件
+  → veryIM 检测 photo/document/voice/video/audio
+  → getFile 获取 file_path → 下载字节
+  → 写入会话 cwd/.uploads/<唯一文件名>
+  → session.prompt 注入 "[f:文件名] 用户上传了文件..."
+  → agent 调 looklook_see("文件名") → 从 .uploads/ 读到 → 描述
+  → veryIM 轮询把回复发回 Telegram
+```
+
+### 改了什么（src/index.ts）
+- 轮询入口：媒体消息不再丢弃，改走 handleMediaMsg
+- 新增 tgDownloadFile()：getFile → 下载 Telegram 文件字节
+- 新增 handleMediaMsg()：提取媒体→下载→存 .uploads/→注入 prompt→轮询回复
+- 新增 sendPhotoModule()：把 sendPhoto 提为模块级，供 handleMsg/handleMediaMsg 共用
+- basename 加入 import（ESM 不用 require）
+
+### 验证
+- 编译通过、渠道正常
+- 文件路径与 looklook_see 的 .uploads/ 解析一致（exec.agent.session.header.cwd）

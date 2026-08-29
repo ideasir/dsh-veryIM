@@ -67,7 +67,7 @@ let _channels = []
 let _modal = null // 'pick' | 'cfg' | 'check'
 let _modalStack = [] // 弹窗历史栈，支持 ESC 退回上一层
 let _edit = null
-let _token = '', _proxy = '', _ws = '', _wl = '', _fb = null, _check = null, _saving = false
+let _token = '', _proxy = '', _ws = '', _wl = '', _hasToken = false, _fb = null, _check = null, _saving = false
 let _showWs = true          // 插件级：WebUI 显示渠道工作区
 let _showChWs = true        // 渠道级：本渠道在 WebUI 显示工作区
 let _render = null // 卡片刷新回调
@@ -86,7 +86,9 @@ function openModal(kind, ch) {
   _modal = kind
   if (kind === 'cfg') {
     _edit = ch || null
-    _token = ch ? (ch.botToken || '') : ''
+    _hasToken = !!(ch && (ch.botToken || (ch.botTokenConfigured ?? false)))
+    // 已有渠道：token 不回填（服务端只回脱敏值，回填会导致误保存）；留空=保持原 token
+    _token = ''
     _proxy = ch ? (ch.proxy || '') : ''
     _ws = ch ? (ch.workspace || '') : ''
     _wl = ch ? (Array.isArray(ch.allowlist) ? ch.allowlist.join(', ') : '') : ''
@@ -144,9 +146,9 @@ function modalHtml() {
           <button class="dsh-vm-mx" data-vm-action="close">${CloseSvg}</button></div>
         <div class="dsh-vm-mb">
           <div class="dsh-vm-mf">
-            <label>Bot Token</label>
-            <input data-vm-token type="text" placeholder="从 @BotFather 获取" value="${esc(_token)}" />
-            <small>在 Telegram 搜索 @BotFather，发送 /newbot 创建</small>
+            <label>Bot Token${_hasToken ? ' <span style="color:var(--dsw-alias-state-success-primary)">✓ 已配置</span>' : ''}</label>
+            <input data-vm-token type="text" placeholder="${_hasToken ? '已配置（留空保持不变）' : '从 @BotFather 获取'}" value="${esc(_token)}" />
+            <small>${_hasToken ? '编辑已有渠道：留空=保持原 Token，输入新值=更换' : '在 Telegram 搜索 @BotFather，发送 /newbot 创建'}</small>
           </div>
           <div class="dsh-vm-mf">
             <label>代理服务器</label>
@@ -267,7 +269,10 @@ document.addEventListener('keydown', (e) => {
 
 async function doTest() {
   _fb = null; renderModal()
-  if (!_token) { _fb = { t: 'er', m: '❌ 请先填写 Bot Token' }; renderModal(); return }
+  if (!_token) {
+    _fb = _hasToken ? { t: 'ok', m: '✅ 已配置 Token，无需重新测试（留空保持原 Token）' } : { t: 'er', m: '❌ 请先填写 Bot Token' }
+    renderModal(); return
+  }
   try {
     const r = await api('/test', { botToken: _token, proxy: _proxy || undefined })
     if (r && r.ok) { _fb = { t: 'ok', m: `✅ @${r.username} (${r.name})` } }

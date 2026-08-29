@@ -724,8 +724,36 @@ function collectModel(events: any[], minTurn = 0): string {
 }
 
 // ── HTTP 工具 ───────────────────────────────────────────
-function json(res: ServerResponse, data: any, status = 200) {
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'access-control-allow-origin': '*' })
+/** Token 脱敏：只留前 5 后 3，中间打码；短 token 全打码 */
+function maskToken(t: string | undefined): string {
+  if (!t) return ''
+  if (t.length <= 10) return '••••••'
+  return `${t.slice(0, 5)}...${t.slice(-3)}`
+}
+/** 判断请求来源是否同源（DSH WebUI 或本机）——收紧 CORS */
+function isSameOrigin(req: IncomingMessage): boolean {
+  const origin = req.headers.origin
+  if (!origin) return true // 无 Origin 头（同源导航/非浏览器）放行
+  const host = req.headers.host || ''
+  try {
+    const o = new URL(origin)
+    // 允许同 host:port 的任何协议；本机 127.0.0.1/localhost 也放行
+    if (o.host === host) return true
+    if (/^(127\.0\.0\.1|localhost)$/.test(o.hostname)) return true
+  } catch { /* ignore */ }
+  return false
+}
+function json(res: ServerResponse, data: any, status = 200, req?: IncomingMessage) {
+  const headers: Record<string, string> = {
+    'content-type': 'application/json', 'cache-control': 'no-store',
+  }
+  // 有 Origin 头时只对同源请求回显（浏览器跨源会被拦截）；无 Origin（非浏览器）回显 *
+  if (req?.headers.origin) {
+    if (isSameOrigin(req)) headers['access-control-allow-origin'] = String(req.headers.origin)
+  } else {
+    headers['access-control-allow-origin'] = '*'
+  }
+  res.writeHead(status, headers)
   res.end(JSON.stringify(data))
 }
 async function body(req: IncomingMessage): Promise<any> {
@@ -746,18 +774,18 @@ export const name = 'dsh-veryIM'
 export function apply(ctx: any) {
   ctx.settings?.register(settingsNamespace('veryim'), VeryIMConfig, { base: { enabled: true } })
 
-  // status：回传 botToken 供编辑表单明文显示 + 设置开关
+  // status：回传脱敏 botToken 供编辑表单显示（不泄露明文）+ 设置开关
   ctx.webServer.register({ kind: 'exact', path: '/plugins/dsh-veryIM/status',
-    handler: async (_: IncomingMessage, res: ServerResponse) => {
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const settings = ctx.get?.('settings') ?? ctx.settings
         const val = settings?.get?.(settingsNamespace('veryim')) ?? {}
         json(res, {
           ok: true,
           settings: { showWorkspaceInWebui: val.showWorkspaceInWebui !== false },
-          channels: loadCfg().channels.map(c => ({ ...c, botToken: c.botToken || "" })),
-        })
-      } catch (e: any) { json(res, { ok: false, error: e.message }, 500) }
+          channels: loadCfg().channels.map(c => ({ ...c, botToken: maskToken(c.botToken) })),
+        }, 200, req)
+      } catch (e: any) { json(res, { ok: false, error: e.message }, 500, req) }
     } })
 
   // 保存插件级 WebUI 工作区显示开关（只存设置，显示/隐藏由客户端 CSS 控制）
@@ -769,8 +797,8 @@ export function apply(ctx: any) {
         const next = !!showWorkspaceInWebui
         if (svc?.update) await svc.update(settingsNamespace('veryim'), { showWorkspaceInWebui: next })
         else if (svc?.mutate) await svc.mutate(settingsNamespace('veryim'), [{ op: 'set', path: ['showWorkspaceInWebui'], value: next }])
-        json(res, { ok: true })
-      } catch (e: any) { json(res, { ok: false, error: e.message }, 500) }
+        json(res, { ok: true }, 200, req)
+      } catch (e: any) { json(res, { ok: false, error: e.message }, 500, req) }
     } })
 
   // test：可用临时 proxy 校验 token
@@ -778,25 +806,25 @@ export function apply(ctx: any) {
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const { botToken, proxy } = await body(req)
-        if (!botToken) { json(res, { ok: false, error: 'botToken required' }, 400); return }
+        if (!botToken) { json(res, { ok: false, error: 'botToken required' }, 400, req); return }
         const disp = proxy ? (() => { try { return new ProxyAgent(proxy) } catch (e: any) { console.warn('[dsh-veryIM] test 代理不可用，回退系统代理: ' + e.message); return undefined } })() : undefined
         let me: any
         try {
           me = await tgRaw(botToken, '/getMe', {}, disp)
         } catch (e: any) {
-          if (!disp) { json(res, { ok: false, error: e.cause?.message || e.message }, 400); return }
+          if (!disp) { json(res, { ok: false, error: e.cause?.message || e.message }, 400, req); return }
           // per-channel 代理网络层失败 → 回退系统代理（全局 fetch）再试一次
           try { me = await tgRaw(botToken, '/getMe', {}) }
-          catch (e2: any) { json(res, { ok: false, error: e2.cause?.message || e2.message }, 400); return }
+          catch (e2: any) { json(res, { ok: false, error: e2.cause?.message || e2.message }, 400, req); return }
         }
-        if (!me.ok) { json(res, { ok: false, error: me.description }, 400); return }
-        json(res, { ok: true, id: me.result.id, username: me.result.username, name: me.result.first_name })
-      } catch (e: any) { json(res, { ok: false, error: e.cause?.message || e.message }, 500) }
+        if (!me.ok) { json(res, { ok: false, error: me.description }, 400, req); return }
+        json(res, { ok: true, id: me.result.id, username: me.result.username, name: me.result.first_name }, 200, req)
+      } catch (e: any) { json(res, { ok: false, error: e.cause?.message || e.message }, 500, req) }
     } })
 
   // check：健康检查
   ctx.webServer.register({ kind: 'exact', path: '/plugins/dsh-veryIM/check',
-    handler: async (_: IncomingMessage, res: ServerResponse) => {
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const cfg = loadCfg()
         const results = await Promise.all(cfg.channels.map(async (ch: any) => {
@@ -811,8 +839,8 @@ export function apply(ctx: any) {
               healthy: false, latencyMs: Date.now() - t0, error: e.message, workspace: ch.workspace || null }
           }
         }))
-        json(res, { ok: true, channels: results, supported: [{ type: 'telegram', name: 'Telegram', desc: 'Bot API 长轮询' }] })
-      } catch (e: any) { json(res, { ok: false, error: e.message }, 500) }
+        json(res, { ok: true, channels: results, supported: [{ type: 'telegram', name: 'Telegram', desc: 'Bot API 长轮询' }] }, 200, req)
+      } catch (e: any) { json(res, { ok: false, error: e.message }, 500, req) }
     } })
 
   // save：编辑已有渠道时若未提供新 botToken，则沿用旧 token；更新时保留 workspace/proxy/lastUpdateId
@@ -823,7 +851,7 @@ export function apply(ctx: any) {
         const cfg = loadCfg()
         const ex = cfg.channels.find((c: any) => c.id === id)
         const finalToken = botToken || ex?.botToken
-        if (!finalToken) { json(res, { ok: false, error: 'botToken required' }, 400); return }
+        if (!finalToken) { json(res, { ok: false, error: 'botToken required' }, 400, req); return }
         // 只有真正更换了 token 才需要向 Telegram 校验；改代理/工作区时跳过，避免被校验卡住
         const tokenChanged = !!(botToken && botToken !== ex?.botToken)
         const ch: any = {
@@ -850,15 +878,15 @@ export function apply(ctx: any) {
             // per-channel 代理网络层失败 → 回退系统代理再校验一次
             me = await tgRaw(botToken, '/getMe', {})
           }
-          if (!me.ok) { json(res, { ok: false, error: me.description || 'Token 无效' }, 400); return }
+          if (!me.ok) { json(res, { ok: false, error: me.description || 'Token 无效' }, 400, req); return }
           ch.botUsername = me.result.username
           ch.botId = String(me.result.id)
           ch.name = name || me.result.first_name
         }
         if (ex) Object.assign(ex, ch); else cfg.channels.push(ch)
         saveCfg(cfg); dispatchers.delete(ch.id); stopPoll(ch.id); startPoll(ch)
-        json(res, { ok: true, channel: { ...ch, botToken: undefined } })
-      } catch (e: any) { json(res, { ok: false, error: e.cause?.message || e.message }, 500) }
+        json(res, { ok: true, channel: { ...ch, botToken: maskToken(ch.botToken) } }, 200, req)
+      } catch (e: any) { json(res, { ok: false, error: e.cause?.message || e.message }, 500, req) }
     } })
 
   // delete
@@ -869,8 +897,8 @@ export function apply(ctx: any) {
         const cfg = loadCfg()
         cfg.channels = cfg.channels.filter((c: any) => c.id !== id)
         saveCfg(cfg); stopPoll(id); dispatchers.delete(id)
-        json(res, { ok: true })
-      } catch (e: any) { json(res, { ok: false, error: e.message }, 500) }
+        json(res, { ok: true }, 200, req)
+      } catch (e: any) { json(res, { ok: false, error: e.message }, 500, req) }
     } })
 
   const cfg = loadCfg()

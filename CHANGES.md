@@ -556,3 +556,27 @@ webui-settings 路由：
 - 逻辑测试 6 用例全过（空名单不限/名单内可用/名单外拒绝/无 id 拒绝）
 - tsc + tsdown 编译通过
 - 部署后 DSH 正常，渠道健康
+
+## 2026-08-29 — P0 安全修复②：Token 脱敏 + CORS 收紧
+
+### 为什么
+审查发现：/status 明文回传 botToken + 所有路由 CORS `*` + 无鉴权——恶意网页可读走 token。
+
+### 改了什么
+**服务端 src/index.ts：**
+- 新增 maskToken()：token 只留前5后3（`86484...UeQ`）
+- 新增 isSameOrigin()：判断请求来源
+- json() 收紧 CORS：有 Origin 头时只对同源回显；跨源无 CORS 头（浏览器拦截）；无 Origin（非浏览器）回显 *
+- /status、/save 路由 botToken 全部脱敏
+- 所有路由 json() 传 req 以支持同源判断
+
+**客户端 src/client/index.js：**
+- 编辑已有渠道时 token 不回填（服务端只回脱敏值，回填会误保存）
+- 显示「✓ 已配置」标识 + 占位符「已配置（留空保持不变）」
+- doTest 已配置渠道留空时提示无需重测
+- 输入新 token 才提交更换
+
+### 验证
+- status 返回 `86484...UeQ`（脱敏）
+- 同源 Origin 回显；跨源 evil.com 无 CORS 头
+- check 路由正常、渠道健康

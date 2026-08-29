@@ -1,6 +1,6 @@
 # Very IM
 
-> 当前版本 `0828-0.2.0`，适配 DSH `v0.1.1-rc.2`（开发者预览版）。把 Telegram 等即时通讯渠道接入 DeepSeek Harness，让 AI 通过 Telegram 与你实时对话。
+> 当前版本 `0829-0.2.1`，适配 DSH `v0.1.1-rc.2`（开发者预览版）。把 Telegram 等即时通讯渠道接入 DeepSeek Harness，让 AI 通过 Telegram 与你实时对话。
 
 ## 功能介绍
 

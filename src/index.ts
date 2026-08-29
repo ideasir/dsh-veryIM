@@ -75,11 +75,16 @@ async function tg(ch: any, path: string, opts: any = {}) {
 
 // ── DSH RPC（直连 localhost，NO_PROXY 保护） ─────────────
 async function dsh(method: string, payload: any) {
-  const r = await fetch(`http://127.0.0.1:3080/api/${method}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: `vi-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, method, payload }),
-  })
-  return r.json()
+  try {
+    const r = await fetch(`http://127.0.0.1:3080/api/${method}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: `vi-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, method, payload }),
+    })
+    return await r.json()
+  } catch (e: any) {
+    console.warn(`[dsh-veryIM] dsh(${method}) error:`, e?.message)
+    return null
+  }
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -232,6 +237,19 @@ async function handleMsg(ch: any, msg: any) {
   }
   if (!sid) { await send('❌ 无法创建对话会话'); return }
 
+  // 确保会话挂进渠道工作区（避免 DSH 把新会话显示为"未分组"）
+  if (ch?.workspace) {
+    try {
+      // 找渠道工作区 id
+      const wsList = await dsh('workspace.list', {}).catch(() => null)
+      const wsItems: any[] = wsList?.result?.value?.items ?? []
+      const targetWs = wsItems.find((w: any) => w.path === ch.workspace)
+      if (targetWs && !targetWs.sessionIds?.includes(sid)) {
+        await dsh('workspace.insertSessionBefore', { workspaceId: targetWs.workspaceId, sessionId: sid }).catch(() => {})
+      }
+    } catch { /* ignore */ }
+  }
+
   // 打断正在进行的回合：新消息到达则 cancel 当前回合，立即处理新消息
   let sentId: number | null = null
   const items0 = await dsh('session.list', {}).then(r => r?.result?.value?.items || [])
@@ -355,16 +373,19 @@ async function handleMsg(ch: any, msg: any) {
   }
 }
 
-// 创建会话：同 chat 并发去重；渠道配置了 workspace 时用其作为会话 cwd
+// 创建会话：同 chat 并发去重；渠道会话用渠道配置的 workspace 目录（电报对话 → 电报工作区）
 function createSessionLocked(key: string, ch: any): Promise<string> {
   const existing = sessionLocks.get(key)
   if (existing) return existing
-  const payload = ch?.workspace ? { cwd: ch.workspace } : {}
+  // 用渠道配置的 workspace 路径（若无则用 DSH 主工作区）
+  const cwd = ch?.workspace && ch.workspace.trim() ? ch.workspace.trim() : '/root/DSH'
+  const payload = { cwd }
   const p = dsh('session.create', payload).then(r => r?.result?.value?.sessionId as string).finally(() => sessionLocks.delete(key))
   sessionLocks.set(key, p)
   return p
 }
 
+// 读插件级设置 showWorkspaceInWebui（经 DSH settings.get RPC）
 const MAX_MSG = 4000
 function cap(s: string, n = 1000): string {
   if (s.length <= n) return s
@@ -708,7 +729,10 @@ async function body(req: IncomingMessage): Promise<any> {
   return JSON.parse(Buffer.concat(chunks).toString('utf-8'))
 }
 
-const VeryIMConfig = Schema.object({ enabled: Schema.boolean().default(true) }, { additionalProperties: true })
+const VeryIMConfig = Schema.object({
+  enabled: Schema.boolean().default(true),
+  showWorkspaceInWebui: Schema.boolean().default(true).description('在 WebUI 侧边栏显示渠道工作区'),
+}, { additionalProperties: true })
 
 // ── 插件入口 ────────────────────────────────────────────
 // 仅声明真实用到的服务；之前的 tools/systemPrompt 未使用却是硬依赖，可能导致 apply 永不执行
@@ -718,10 +742,31 @@ export const name = 'dsh-veryIM'
 export function apply(ctx: any) {
   ctx.settings?.register(settingsNamespace('veryim'), VeryIMConfig, { base: { enabled: true } })
 
-  // status：回传 botToken 供编辑表单明文显示
+  // status：回传 botToken 供编辑表单明文显示 + 设置开关
   ctx.webServer.register({ kind: 'exact', path: '/plugins/dsh-veryIM/status',
     handler: async (_: IncomingMessage, res: ServerResponse) => {
-      json(res, { ok: true, channels: loadCfg().channels.map(c => ({ ...c, botToken: c.botToken || "" })) })
+      try {
+        const settings = ctx.get?.('settings') ?? ctx.settings
+        const val = settings?.get?.(settingsNamespace('veryim')) ?? {}
+        json(res, {
+          ok: true,
+          settings: { showWorkspaceInWebui: val.showWorkspaceInWebui !== false },
+          channels: loadCfg().channels.map(c => ({ ...c, botToken: c.botToken || "" })),
+        })
+      } catch (e: any) { json(res, { ok: false, error: e.message }, 500) }
+    } })
+
+  // 保存插件级 WebUI 工作区显示开关（只存设置，显示/隐藏由客户端 CSS 控制）
+  ctx.webServer.register({ kind: 'exact', path: '/plugins/dsh-veryIM/webui-settings',
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        const { showWorkspaceInWebui } = await body(req)
+        const svc = ctx.get?.('settings') ?? ctx.settings
+        const next = !!showWorkspaceInWebui
+        if (svc?.update) await svc.update(settingsNamespace('veryim'), { showWorkspaceInWebui: next })
+        else if (svc?.mutate) await svc.mutate(settingsNamespace('veryim'), [{ op: 'set', path: ['showWorkspaceInWebui'], value: next }])
+        json(res, { ok: true })
+      } catch (e: any) { json(res, { ok: false, error: e.message }, 500) }
     } })
 
   // test：可用临时 proxy 校验 token
@@ -770,7 +815,7 @@ export function apply(ctx: any) {
   ctx.webServer.register({ kind: 'exact', path: '/plugins/dsh-veryIM/save',
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
-        const { id, botToken, name, workspace, proxy } = await body(req)
+        const { id, botToken, name, workspace, proxy, showInWebui } = await body(req)
         const cfg = loadCfg()
         const ex = cfg.channels.find((c: any) => c.id === id)
         const finalToken = botToken || ex?.botToken
@@ -788,6 +833,7 @@ export function apply(ctx: any) {
           lastUpdateId: ex?.lastUpdateId || 0,
           workspace: workspace !== undefined ? workspace : ex?.workspace,
           proxy: proxy !== undefined ? proxy : ex?.proxy,
+          showInWebui: showInWebui !== undefined ? !!showInWebui : (ex?.showInWebui !== undefined ? ex.showInWebui : false),
         }
         if (tokenChanged) {
           const disp = proxy ? (() => { try { return new ProxyAgent(proxy) } catch (e: any) { console.warn('[dsh-veryIM] save 代理不可用: ' + e.message); return undefined } })() : undefined

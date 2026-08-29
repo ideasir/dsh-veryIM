@@ -470,3 +470,68 @@ step=2 补充说明，step=3 最终报告）。之前的 `collectAnswers` 用 `t
 - DSH 事件模型：turn 是"对话回合"，step 是"回合内的执行步骤"。
   一个 turn 里可能有多条 assistant/message（step 递增），
   去重必须用 turn+step 组合，不能只用 turn。
+
+## 2026-08-29 — WebUI 工作区显示开关
+
+### 需求（主任）
+1. 插件设置里加开关：控制 WebUI 显示渠道工作区（全局）
+2. 渠道编辑里加开关：单个渠道是否在 WebUI 显示工作区
+
+### 改了什么
+**服务端 src/index.ts：**
+- VeryIMConfig 加 showWorkspaceInWebui（默认 true）
+- /status 返回 settings.showWorkspaceInWebui + 渠道 showInWebui
+- /save 支持 showInWebui（默认 true）
+- 新增 /webui-settings 保存插件级开关
+
+**客户端 src/client/index.js（实际入口，非 index.tsx）：**
+- 卡片展开区加"在 WebUI 显示渠道工作区"插件级开关（调 /webui-settings）
+- 编辑弹窗加"在 WebUI 显示工作区"渠道级开关（doSave 传 showInWebui）
+- openModal 读取 showInWebui；toggle-ch-ws 切换
+
+### 踩坑（重要）
+- **veryIM 客户端真实入口是 src/client/index.js（纯 JS），不是 index.tsx！**
+  tsdown.config.ts 的 entry 配的是 index.js。之前改了 index.tsx 构建产物根本没变化，
+  白白浪费时间。以后改 veryIM 客户端必须先确认入口文件。
+
+## 2026-08-29 — WebUI 工作区显示开关（修复版）
+
+### 问题
+之前开关只做了一半：关闭时删工作区，但开启时不恢复 → 开关开了工作区也不显示。
+主任反馈"开了不显示，关了还显示"。
+
+### 修复（双向逻辑）
+webui-settings 路由：
+- 开启 → workspace.create({path}) 重新注册渠道工作区（显示）
+- 关闭 → workspace.delete 移除注册（隐藏）
+- 会话数据始终保留在磁盘（workspace.delete 只删注册不删数据）
+
+### 验证（浏览器实测）
+- 开 → 侧边栏 telegram + DSH
+- 关 → 侧边栏只有 DSH
+
+## 2026-08-29 — 最终版：渠道级工作区显示开关（默认隐藏）
+
+### 需求（主任）
+1. 删掉插件设置里的总开关，"在 WebUI 显示渠道工作区"只在编辑渠道页面里设置
+2. 默认不在侧边栏显示渠道工作区（标题+对话全隐藏）
+3. 渠道级开关控制：打开才显示，关闭整个工作区段（含所有对话）一起隐藏
+
+### 改了什么
+**服务端 src/index.ts：**
+- save 路由的 showInWebui 默认值从 true 改为 false（新增渠道默认隐藏）
+- createSessionLocked 用渠道配置的 workspace 路径建会话（电报对话 → 电报工作区）
+- handleMsg 中自动把会话挂进渠道工作区（insertSessionBefore），避免出现"未分组"
+
+**客户端 src/client/index.js（实际入口）：**
+- 删除插件设置里的总开关 UI 和事件绑定
+- 编辑渠道弹窗保留"在 WebUI 显示工作区"开关（渠道级）
+- hideChannelWorkspaces 只读渠道级 showInWebui，不再读插件级 _showWs
+- 隐藏逻辑改为向上找到 groupSection（整个工作区段容器，含标题+所有会话）一起隐藏
+- 切换开关后刷新渠道配置再应用隐藏
+
+### 验证（浏览器实测）
+- 默认关闭（showInWebui=false）→ telegram 标题不可见 + 所有会话不可见 ✅
+- 编辑渠道打开开关 → telegram 标题+5条对话恢复显示 ✅
+- 关闭 → 整个 telegram 工作区段（标题+对话）全部消失，无残留 ✅
+- 渠道健康、工作区数据正常 ✅

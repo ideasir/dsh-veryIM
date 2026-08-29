@@ -68,12 +68,14 @@ let _modal = null // 'pick' | 'cfg' | 'check'
 let _modalStack = [] // 弹窗历史栈，支持 ESC 退回上一层
 let _edit = null
 let _token = '', _proxy = '', _ws = '', _fb = null, _check = null, _saving = false
+let _showWs = true          // 插件级：WebUI 显示渠道工作区
+let _showChWs = true        // 渠道级：本渠道在 WebUI 显示工作区
 let _render = null // 卡片刷新回调
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
 
 async function refreshChannels() {
-  try { const r = await api('/status'); if (r && r.ok) _channels = r.channels || [] } catch (e) {}
+  try { const r = await api('/status'); if (r && r.ok) { _channels = r.channels || []; if (r.settings) _showWs = r.settings.showWorkspaceInWebui !== false } } catch (e) {}
 }
 
 function openModal(kind, ch) {
@@ -87,6 +89,7 @@ function openModal(kind, ch) {
     _token = ch ? (ch.botToken || '') : ''
     _proxy = ch ? (ch.proxy || '') : ''
     _ws = ch ? (ch.workspace || '') : ''
+    _showChWs = ch ? (ch.showInWebui !== false) : true
     _fb = null
   }
   if (kind === 'check') { _check = null; runCheck() }
@@ -154,6 +157,13 @@ function modalHtml() {
             <input data-vm-ws type="text" placeholder="/vol1/1000/DeepSeek/telegram" value="${esc(_ws)}" />
             <small>可选。留空使用 DSH 默认工作区</small>
           </div>
+          <div class="dsh-vm-mf">
+            <label>在 WebUI 显示工作区</label>
+            <button data-vm-action="toggle-ch-ws" type="button" style="width:38px;height:20px;border-radius:10px;border:none;cursor:pointer;position:relative;background:${_showChWs ? 'var(--dsw-alias-state-success-primary,#22c55e)' : 'rgba(255,255,255,0.15)'};transition:background .2s">
+              <span style="position:absolute;top:2px;width:16px;height:16px;border-radius:50%;background:#fff;left:${_showChWs ? 20 : 2}px;transition:left .2s"></span>
+            </button>
+            <small>关闭后，本渠道的工作区不在 WebUI 侧边栏显示</small>
+          </div>
           <div style="display:flex;gap:8px">
             <button class="dsh-vm-b" data-vm-action="test" style="padding:7px 16px;border:1px solid var(--dsw-alias-border-l2,#4b4b4f);border-radius:8px;background:var(--dsw-alias-bg-layer-1,#2c2c2e);color:var(--dsw-alias-label-primary,#f9fafb);font-size:13px;line-height:1.4;cursor:pointer">验证 Token</button>
           </div>
@@ -216,6 +226,20 @@ function bindModal(root) {
       if (a === 'test') doTest()
       if (a === 'save') doSave()
       if (a === 'recheck') runCheck()
+      if (a === 'toggle-ch-ws') {
+        _showChWs = !_showChWs
+        renderModal()
+        // 保存渠道级开关到服务端，刷新渠道配置后应用隐藏
+        if (_edit && _edit.id) {
+          const data = { showInWebui: _showChWs, id: _edit.id }
+          api('/save', data).then(async () => {
+            try { await refreshChannels() } catch (e) {}
+            hideChannelWorkspaces()
+          })
+        } else {
+          hideChannelWorkspaces()
+        }
+      }
     })
   })
 
@@ -251,7 +275,7 @@ async function doTest() {
 async function doSave() {
   _saving = true; renderModal()
   try {
-    const r = await api('/save', { botToken: _token, proxy: _proxy || undefined, workspace: _ws || undefined, ...(_edit && _edit.id ? { id: _edit.id } : {}) })
+    const r = await api('/save', { botToken: _token, proxy: _proxy || undefined, workspace: _ws || undefined, showInWebui: _showChWs, ...(_edit && _edit.id ? { id: _edit.id } : {}) })
     if (r && r.ok) {
       _fb = { t: 'ok', m: '✅ 已保存并连接' }
       await refreshChannels()
@@ -281,11 +305,76 @@ async function delChannel(id) {
 export const inject = ['slots']
 
 export function apply(ctx) {
-  // 注入 CSS
+  // 注入弹窗 CSS
   if (!document.getElementById('dsh-vm-css')) {
     const s = document.createElement('style'); s.id = 'dsh-vm-css'; s.textContent = CSS
     document.head.appendChild(s)
   }
+
+  // ── WebUI 工作区显示控制（CSS 隐藏/显示，不碰任何数据） ──
+  // 渠道工作区按渠道名隐藏：关闭开关 → 侧边栏工作区 display:none；开启 → 恢复
+  const WS_HIDE_CLASS = 'dsh-vm-ws-hidden'
+  if (!document.getElementById('dsh-vm-ws-css')) {
+    const s = document.createElement('style'); s.id = 'dsh-vm-ws-css'
+    s.textContent = `.dsh-vm-ws-hidden{display:none!important}`
+    document.head.appendChild(s)
+  }
+
+  // 找到渠道工作区元素：按渠道名 + 渠道 workspace 路径末段（如 telegram）匹配侧边栏工作区行
+  // 逻辑：渠道 showInWebui 开 → 显示；关 → 隐藏（整个工作区块）
+  function hideChannelWorkspaces() {
+    if (!_channels || _channels.length === 0) return
+    // 每个渠道 → 是否应显示
+    const showMap = new Map()  // 工作区名 → 是否显示
+    _channels.forEach(c => {
+      const visible = c.showInWebui !== false
+      const n = (c.botUsername || c.name || '').trim()
+      if (n) showMap.set(n, visible)
+      const ws = (c.workspace || '').trim()
+      if (ws) showMap.set(ws.split('/').filter(Boolean).pop(), visible)
+    })
+    if (showMap.size === 0) return
+    const rows = document.querySelectorAll('[class*="projectRow"],[class*="project-row"]')
+    rows.forEach(row => {
+      const text = (row.textContent || '').trim()
+      for (const [name, visible] of showMap) {
+        if (text === name || text.includes(name)) {
+          // 隐藏整个工作区段（标题 + 所有会话）：向上找到 groupSection 容器
+          let block = row.parentElement
+          // 向上找 qDHVXG_groupSection（工作区整段容器，含标题和所有会话）
+          let section = row
+          for (let i = 0; i < 4; i++) {
+            section = section.parentElement
+            if (!section) break
+            if (/groupSection|group-section/.test(section.className)) break
+          }
+          const target = section && /groupSection|group-section/.test(section.className) ? section : block
+          if (visible) target.classList.remove(WS_HIDE_CLASS)
+          else target.classList.add(WS_HIDE_CLASS)
+          break
+        }
+      }
+    })
+  }
+
+  // 监听侧边栏变化（工作区渲染后立即应用隐藏）
+  let wsTimer = null
+  function scheduleWsHide() {
+    if (wsTimer) clearTimeout(wsTimer)
+    wsTimer = setTimeout(() => {
+      hideChannelWorkspaces()
+    }, 150)
+  }
+  const wsObserver = new MutationObserver(() => scheduleWsHide())
+  // 启动：先拉渠道配置（填 _channels/_showWs），再观察侧边栏
+  setTimeout(async () => {
+    try { await refreshChannels() } catch (e) {}
+    const sb = document.querySelector('[class*="workspaces"]') || document.body
+    wsObserver.observe(sb, { childList: true, subtree: true })
+    scheduleWsHide()
+    // 持续重试几次（侧边栏可能延迟渲染）
+    for (let i = 0; i < 5; i++) { setTimeout(scheduleWsHide, (i + 1) * 1000) }
+  }, 800)
 
   function VeryIMPluginCard() {
     const R = window.React || require('react')
@@ -336,28 +425,28 @@ export function apply(ctx) {
               <span class="dsh-vm-ch-del" data-del-id="${esc(ch.id)}" style="cursor:pointer;color:var(--dsw-alias-label-tertiary,#999);margin-left:4px">✕</span>
             </div>`).join('') + `</div>`
         : ''
-      const btn = `<button class="dsh-vm-big" data-vm-open-add style="margin-top:${chans.length ? '0' : '0'}"><span>${PlusSvg}</span>添加渠道</button>`
+      const btn = `<button class="dsh-vm-big" data-vm-open-add style="margin-top:0"><span>${PlusSvg}</span>添加渠道</button>`
 
-      // 用 ref 挂载 DOM
-      return R.createElement('li', { className: 'dsh-mm-card' }, head,
-        R.createElement('div', { className: 'dsh-mm-body' },
-          R.createElement('div', { ref: (el) => {
-            if (!el) return
-            el.innerHTML = channelsHtml + btn
-            // 绑定事件
-            el.querySelectorAll('[data-ch-id]').forEach(c => {
-              c.addEventListener('click', () => {
-                const id = c.getAttribute('data-ch-id')
-                const ch = chans.find(x => x.id === id)
-                if (ch) openModal('cfg', ch)
-              })
-            })
-            el.querySelectorAll('[data-del-id]').forEach(c => {
-              c.addEventListener('click', (e) => { e.stopPropagation(); delChannel(c.getAttribute('data-del-id')) })
-            })
-            el.querySelector('[data-vm-open-add]').addEventListener('click', () => openModal('pick'))
-          } })
-        ))
+            // 用 ref 挂载 DOM
+            return R.createElement('li', { className: 'dsh-mm-card' }, head,
+              R.createElement('div', { className: 'dsh-mm-body' },
+                R.createElement('div', { ref: (el) => {
+                  if (!el) return
+                  el.innerHTML = channelsHtml + btn
+                  // 绑定事件
+                  el.querySelectorAll('[data-ch-id]').forEach(c => {
+                    c.addEventListener('click', () => {
+                      const id = c.getAttribute('data-ch-id')
+                      const ch = chans.find(x => x.id === id)
+                      if (ch) openModal('cfg', ch)
+                    })
+                  })
+                  el.querySelectorAll('[data-del-id]').forEach(c => {
+                    c.addEventListener('click', (e) => { e.stopPropagation(); delChannel(c.getAttribute('data-del-id')) })
+                  })
+                  el.querySelector('[data-vm-open-add]').addEventListener('click', () => openModal('pick'))
+                } })
+              ))
     }
 
     return R.createElement('li', { className: 'dsh-mm-card' }, head, body)
